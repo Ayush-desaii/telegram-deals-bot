@@ -1,0 +1,69 @@
+name: 🛍️ Auto Post Amazon Deals
+
+on:
+  # ── Run every hour (adjust time as needed) ────────────────
+  schedule:
+    - cron: '0 * * * *'   # Every hour at :00
+
+  # ── Also allow manual trigger from GitHub UI ───────────────
+  workflow_dispatch:
+
+jobs:
+  post-deals:
+    name: Fetch & Post Deals
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # 1. Checkout your code
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # 3. Install dependencies
+      - name: 📦 Install Dependencies
+        run: |
+          pip install -r deals_bot/requirements.txt
+
+      # 4. Create .env from GitHub Secrets
+      - name: 🔐 Create .env file
+        run: |
+          cat > deals_bot/.env << EOF
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID=${{ secrets.TELEGRAM_CHANNEL_ID }}
+          AMAZON_AFFILIATE_TAG=${{ secrets.AMAZON_AFFILIATE_TAG }}
+          FETCH_INTERVAL_MINUTES=60
+          MIN_DISCOUNT_PERCENT=40
+          MAX_DEALS_PER_CYCLE=3
+          EOF
+
+      # 5. Restore deals database (to avoid duplicate posts)
+      - name: 🗄️ Restore Deals Database
+        uses: actions/cache@v4
+        with:
+          path: deals_bot/deals_bot.db
+          key: deals-db-${{ github.run_number }}
+          restore-keys: |
+            deals-db-
+
+      # 6. Run the bot (one-shot mode)
+      - name: 🚀 Post Deals
+        run: |
+          cd deals_bot
+          python -X utf8 main.py --now
+        env:
+          PYTHONIOENCODING: utf-8
+
+      # 7. Save updated database back to cache
+      - name: 💾 Save Deals Database
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: deals_bot/deals_bot.db
+          key: deals-db-${{ github.run_number }}
