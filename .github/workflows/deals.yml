@@ -1,50 +1,45 @@
-name: 🛍️ Auto Post Amazon Deals
+name: 🛍️ Daily Amazon Deals Bot
 
 on:
-  # ── Run every hour (adjust time as needed) ────────────────
+  # ── Run once daily at 9:00 AM IST (3:30 AM UTC) ───────────
   schedule:
-    - cron: '0 * * * *'   # Every hour at :00
+    - cron: '30 3 * * *'
 
-  # ── Also allow manual trigger from GitHub UI ───────────────
+  # ── Manual trigger from GitHub Actions UI ─────────────────
   workflow_dispatch:
 
 jobs:
   post-deals:
-    name: Fetch & Post Deals
+    name: Fetch & Post Amazon Deals
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      # 1. Checkout your code
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      # 2. Set up Python
-      - name: 🐍 Setup Python
+      - name: 🐍 Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
+          cache-dependency-path: deals_bot/requirements.txt
 
-      # 3. Install dependencies
       - name: 📦 Install Dependencies
-        run: |
-          pip install -r deals_bot/requirements.txt
+        run: pip install -r deals_bot/requirements.txt
 
-      # 4. Create .env from GitHub Secrets
-      - name: 🔐 Create .env file
+      - name: 🔐 Create .env from GitHub Secrets
         run: |
-          cat > deals_bot/.env << EOF
+          cat > deals_bot/.env << 'EOF'
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID=${{ secrets.TELEGRAM_CHANNEL_ID }}
           AMAZON_AFFILIATE_TAG=${{ secrets.AMAZON_AFFILIATE_TAG }}
-          FETCH_INTERVAL_MINUTES=60
+          FETCH_INTERVAL_MINUTES=1440
           MIN_DISCOUNT_PERCENT=40
-          MAX_DEALS_PER_CYCLE=3
+          MAX_DEALS_PER_CYCLE=5
           EOF
 
-      # 5. Restore deals database (to avoid duplicate posts)
-      - name: 🗄️ Restore Deals Database
+      - name: 🗄️ Restore Deals Database (avoid duplicate posts)
         uses: actions/cache@v4
         with:
           path: deals_bot/deals_bot.db
@@ -52,16 +47,14 @@ jobs:
           restore-keys: |
             deals-db-
 
-      # 6. Run the bot (one-shot mode)
-      - name: 🚀 Post Deals
+      - name: 🚀 Run Deals Bot
         run: |
           cd deals_bot
           python -X utf8 main.py --now
         env:
           PYTHONIOENCODING: utf-8
 
-      # 7. Save updated database back to cache
-      - name: 💾 Save Deals Database
+      - name: 💾 Save Database Cache
         uses: actions/cache/save@v4
         if: always()
         with:
