@@ -25,5 +25,5 @@ env/
 *.swp
 
 # Instagram bot credentials and local state
-insta_bot/config.json
-insta_bot/data/
+insta_bot/
+insta-live/

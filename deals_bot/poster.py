@@ -1,34 +1,61 @@
 """
-poster.py - Posts Amazon deals to Telegram channel with product image + metadata
+poster.py - Posts Amazon deals to Telegram channel with watermarked image + metadata
 """
+import io
 import requests
+from typing import Union
 from fetcher import Deal
 from formatter import format_deal_message, format_text_only_message
+from watermark import add_watermark
 import config
 
 TELEGRAM_API = f"https://api.telegram.org/bot{config.BOT_TOKEN}"
 
 
-def send_photo_with_caption(image_url: str, caption: str) -> bool:
-    """Send product photo with deal caption."""
+def send_photo_with_caption(photo: Union[str, io.BytesIO, bytes], caption: str) -> bool:
+    """
+    Send product photo with deal caption.
+    Supports either direct image URL (str) or in-memory watermarked image (io.BytesIO).
+    """
     # Telegram caption limit is 1024 characters
     if len(caption) > 1024:
         caption = caption[:1020] + "..."
 
     url = f"{TELEGRAM_API}/sendPhoto"
-    payload = {
-        "chat_id": config.CHANNEL_ID,
-        "photo": image_url,
-        "caption": caption,
-        "parse_mode": "HTML",
-    }
+
     try:
-        resp = requests.post(url, json=payload, timeout=20)
+        if isinstance(photo, (io.BytesIO, bytes)):
+            # Sending watermarked image buffer as multipart file
+            if isinstance(photo, io.BytesIO):
+                photo.seek(0)
+                file_bytes = photo.read()
+            else:
+                file_bytes = photo
+
+            files = {"photo": ("deal.jpg", file_bytes, "image/jpeg")}
+            data = {
+                "chat_id": config.CHANNEL_ID,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+            resp = requests.post(url, data=data, files=files, timeout=30)
+        else:
+            # Sending by remote image URL string
+            payload = {
+                "chat_id": config.CHANNEL_ID,
+                "photo": photo,
+                "caption": caption,
+                "parse_mode": "HTML",
+            }
+            resp = requests.post(url, json=payload, timeout=20)
+
         data = resp.json()
         if data.get("ok"):
             return True
-        print(f"⚠️  sendPhoto failed: {data.get('description')} — trying text only")
+
+        print(f"⚠️  sendPhoto failed: {data.get('description')}")
         return False
+
     except Exception as e:
         print(f"❌ sendPhoto error: {e}")
         return False
@@ -61,21 +88,33 @@ def send_message(text: str) -> bool:
 def post_deal(deal: Deal) -> bool:
     """
     Post a deal to the channel.
-    - If image available: send photo + caption (shows product image)
-    - Fallback: send rich text message with link preview (shows Amazon card)
+    1. Try sending branded watermarked image with caption
+    2. If watermarking fails, fallback to raw Amazon image with caption
+    3. If image send fails, fallback to rich text message with link preview
     """
+    caption = format_deal_message(deal)
+
     if deal.image_url:
-        caption = format_deal_message(deal)
+        # Tier 1: Branded Watermarked Photo
+        watermarked_buf = add_watermark(deal.image_url, deal)
+        if watermarked_buf:
+            success = send_photo_with_caption(watermarked_buf, caption)
+            if success:
+                print(f"✅ Posted with branded watermark: {deal.title[:55]}...")
+                return True
+            print("⚠️  Branded photo upload failed, attempting raw image URL fallback...")
+
+        # Tier 2: Raw Image URL Fallback
         success = send_photo_with_caption(deal.image_url, caption)
         if success:
-            print(f"✅ Posted with image: {deal.title[:60]}...")
+            print(f"✅ Posted with raw image: {deal.title[:55]}...")
             return True
 
-    # Fallback to text (link preview will show Amazon product card)
+    # Tier 3: Rich Text Fallback
     message = format_text_only_message(deal)
     success = send_message(message)
     if success:
-        print(f"✅ Posted as text: {deal.title[:60]}...")
+        print(f"✅ Posted as text: {deal.title[:55]}...")
     return success
 
 
