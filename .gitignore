@@ -23,3 +23,7 @@ env/
 .vscode/
 .idea/
 *.swp
+
+# Instagram bot credentials and local state
+insta_bot/config.json
+insta_bot/data/
