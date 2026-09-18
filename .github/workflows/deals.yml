@@ -1,9 +1,11 @@
-name: 🛍️ Daily Amazon Deals Bot
+name: 🛍️ Smart Scheduled Amazon Deals Bot
 
 on:
-  # ── Run once daily at 9:00 AM IST (3:30 AM UTC) ───────────
+  # ── 3 Peak Indian Mobile-Usage Slots Daily ───────────────
   schedule:
-    - cron: '30 3 * * *'
+    - cron: '30 3 * * *'   # 09:00 AM IST (Morning Commute)
+    - cron: '0 8 * * *'    # 01:30 PM IST (Lunch Break)
+    - cron: '0 15 * * *'   # 08:30 PM IST (Prime Evening Shopping)
 
   # ── Manual trigger from GitHub Actions UI ─────────────────
   workflow_dispatch:
@@ -34,13 +36,12 @@ jobs:
           TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID=${{ secrets.TELEGRAM_CHANNEL_ID }}
           AMAZON_AFFILIATE_TAG=${{ secrets.AMAZON_AFFILIATE_TAG }}
-          FETCH_INTERVAL_MINUTES=1440
+          FETCH_INTERVAL_MINUTES=360
           MIN_DISCOUNT_PERCENT=40
-          MAX_DEALS_PER_CYCLE=5
+          MAX_DEALS_PER_CYCLE=2
           EOF
 
-      # Restore DB — key uses date so old deals (>7 days) naturally expire
-      # after a week without needing to clear the whole cache
+      # Restore DB — prevents duplicate posts across runs
       - name: 🗄️ Restore Deals Database
         uses: actions/cache@v4
         with:
