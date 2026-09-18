@@ -98,8 +98,26 @@ def extract_asin(url: str) -> Optional[str]:
     m = re.search(r"/(?:dp|gp/product|product)/([A-Z0-9]{10})", url)
     return m.group(1) if m else None
 
-def make_affiliate_url(asin: str) -> str:
-    return add_affiliate_tag(f"https://www.amazon.in/dp/{asin}")
+def make_affiliate_url(asin_or_url: str) -> str:
+    """
+    Converts product links into affiliate links:
+    - Amazon links get Amazon Associates tag
+    - Flipkart, Myntra, Ajio links get EarnKaro affiliate redirect
+    """
+    url = asin_or_url
+    if re.match(r"^[A-Z0-9]{10}$", url):
+        return add_affiliate_tag(f"https://www.amazon.in/dp/{url}")
+
+    if "amazon.in" in url or "amzn.to" in url or "amzn.in" in url:
+        return add_affiliate_tag(url)
+
+    # Multi-store EarnKaro routing (Flipkart, Myntra, Ajio, Nykaa)
+    ek_id = getattr(config, "EARNKARO_USER_ID", "")
+    if ek_id and any(store in url for store in ["flipkart.com", "myntra.com", "ajio.com", "nykaa.com"]):
+        from urllib.parse import quote
+        return f"https://earnkaro.com/deal?url={quote(url, safe='')}&r={ek_id}"
+
+    return url
 
 def resolve_short_url(url: str) -> str:
     if "amzn.to" in url or ("amzn.in" in url and "/dp/" not in url):
@@ -697,9 +715,15 @@ def fetch_all_deals() -> list[Deal]:
     return unique
 
 
+SUPPORTED_STORES = [
+    "amazon.in", "amzn.to", "amzn.in",
+    "flipkart.com", "dl.flipkart.com",
+    "myntra.com", "ajio.com", "earnkaro.com"
+]
+
 def filter_deals(deals: list[Deal]) -> list[Deal]:
     """
-    Keep only Amazon.in links.
+    Keep valid deals from Amazon, Flipkart, Myntra, Ajio.
     For deals WITH discount data: apply minimum discount filter.
     For deals WITHOUT discount data (bestsellers): require price < ₹2000.
     """
@@ -707,7 +731,7 @@ def filter_deals(deals: list[Deal]) -> list[Deal]:
     for deal in deals:
         if not deal.title or not deal.url:
             continue
-        if "amazon.in" not in deal.url:
+        if not any(store in deal.url.lower() for store in SUPPORTED_STORES):
             continue
         if deal.discount_percent is not None:
             if deal.discount_percent < config.MIN_DISCOUNT_PERCENT:

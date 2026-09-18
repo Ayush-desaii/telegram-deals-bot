@@ -10,8 +10,13 @@ load_dotenv()
 BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
 
-# ── Affiliate ─────────────────────────────────────────────
+# ── Affiliate: Amazon ─────────────────────────────────────
 AMAZON_AFFILIATE_TAG: str = os.getenv("AMAZON_AFFILIATE_TAG", "")
+
+# ── Affiliate: Multi-Store via EarnKaro (Flipkart, Myntra, Ajio) ──
+# Sign up free: https://earnkaro.com/
+# Use your Referral code/ID from your profile (e.g. 1234567)
+EARNKARO_USER_ID: str = os.getenv("EARNKARO_USER_ID", "")
 
 # ── Amazon PA API (optional but recommended for best results) ──
 # Sign up: https://affiliate-program.amazon.in/assoc_credentials/home

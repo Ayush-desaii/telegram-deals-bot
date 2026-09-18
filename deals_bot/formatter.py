@@ -116,7 +116,9 @@ def format_deal_message(deal: Deal) -> str:
             pass
 
     # ── CTA ───────────────────────────────────────────────
-    lines.append(f'🛒 <a href="{deal.url}"><b>BUY NOW ON AMAZON →</b></a>')
+    url_lower = deal.url.lower()
+    store_cta = "FLIPKART" if "flipkart" in url_lower else ("MYNTRA" if "myntra" in url_lower else ("AJIO" if "ajio" in url_lower else "AMAZON"))
+    lines.append(f'🛒 <a href="{deal.url}"><b>BUY NOW ON {store_cta} →</b></a>')
     lines.append("")
 
     # ── Hashtags ──────────────────────────────────────────
@@ -197,7 +199,16 @@ def format_text_only_message(deal: Deal) -> str:
 # ── Hashtag Builder ────────────────────────────────────────────────────────────
 
 def build_hashtags(deal: Deal) -> str:
-    tags = ["#LootDeal", "#AmazonIndia"]
+    tags = ["#LootDeal"]
+    url_lower = deal.url.lower()
+    if "flipkart" in url_lower:
+        tags.append("#FlipkartDeals")
+    elif "myntra" in url_lower:
+        tags.append("#MyntraSale")
+    elif "ajio" in url_lower:
+        tags.append("#AjioSale")
+    else:
+        tags.append("#AmazonIndia")
 
     disc = deal.discount_percent or 0
     if disc >= 70:

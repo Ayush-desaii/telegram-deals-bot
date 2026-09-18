@@ -31,10 +31,21 @@ def build_deal_keyboard(deal: Deal) -> dict:
 
     share_url = f"https://t.me/share/url?url={quote(channel_link, safe='')}&text={quote(share_text, safe='')}"
 
+    # Detect store for button text
+    url_lower = deal.url.lower()
+    if "flipkart" in url_lower:
+        store_name = "FLIPKART"
+    elif "myntra" in url_lower:
+        store_name = "MYNTRA"
+    elif "ajio" in url_lower:
+        store_name = "AJIO"
+    else:
+        store_name = "AMAZON"
+
     return {
         "inline_keyboard": [
             [
-                {"text": "🛒 BUY NOW ON AMAZON →", "url": deal.url}
+                {"text": f"🛒 BUY NOW ON {store_name} →", "url": deal.url}
             ],
             [
                 {"text": "📢 SHARE DEAL WITH FRIENDS", "url": share_url}
