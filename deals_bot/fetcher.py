@@ -307,23 +307,26 @@ def scrape_product_page(url: str) -> Optional[dict]:
     }
 
 
-# ── Source 1: Amazon Sale Search Pages (Best for Discounts) ───────────────────
-# These pages filter for products that actually have deals/discounts
+# ── Source 1: Amazon Sale Search Pages ────────────────────────────────────────
 
 DEAL_SEARCH_PAGES = [
-    # Keyword search + discount-rank sort — more reliable than parameterised filter URLs
+    # Daily-changing sale keywords — varied enough to find fresh deals every day
     ("https://www.amazon.in/s?k=electronics+offer&s=discount-rank", "Electronics"),
-    ("https://www.amazon.in/s?k=smartphones+under+5000+offer&s=discount-rank", "Mobiles"),
+    ("https://www.amazon.in/s?k=mobile+phone+sale+india&s=discount-rank", "Mobiles"),
     ("https://www.amazon.in/s?k=bluetooth+headphones+offer&s=discount-rank", "Audio"),
+    ("https://www.amazon.in/s?k=smart+tv+sale&s=discount-rank", "TVs"),
     ("https://www.amazon.in/s?k=kitchen+appliances+offer&s=discount-rank", "Kitchen"),
-    ("https://www.amazon.in/s?k=fitness+equipment+sale&s=discount-rank", "Sports"),
-    ("https://www.amazon.in/s?k=laptop+sale+india&s=discount-rank", "Laptops"),
+    ("https://www.amazon.in/s?k=fitness+gym+equipment+offer&s=discount-rank", "Sports"),
+    ("https://www.amazon.in/s?k=laptop+offer+india&s=discount-rank", "Laptops"),
+    ("https://www.amazon.in/s?k=fashion+clothing+sale&s=discount-rank", "Fashion"),
+    ("https://www.amazon.in/s?k=usb+cable+charger+offer&s=discount-rank", "Accessories"),
+    ("https://www.amazon.in/s?k=home+decor+offer&s=discount-rank", "Home Decor"),
 ]
 
 def fetch_amazon_sale_page(page_url: str, category: str, max_items: int = 8) -> list[Deal]:
     """
-    Scrape Amazon search results filtered for discounted products.
-    These pages show products WITH discount % and MRP — much better than bestsellers.
+    Scrape Amazon search results for discounted products.
+    Uses multiple robust selector strategies to handle HTML differences across regions/UAs.
     """
     deals = []
     resp = safe_get(page_url)
@@ -331,48 +334,87 @@ def fetch_amazon_sale_page(page_url: str, category: str, max_items: int = 8) -> 
         return deals
 
     soup = BeautifulSoup(resp.text, "html.parser")
-    products = (soup.select("div[data-component-type='s-search-result'][data-asin]") or
-                soup.select("div.s-result-item[data-asin]"))
 
-    found = [p for p in products if p.get("data-asin") and len(p.get("data-asin", "")) == 10]
-    print(f"   📦 {category}: {len(found)} results")
+    # Strategy: find all divs that have a 10-char ASIN — works across all Amazon page layouts
+    all_asin_divs = soup.find_all("div", attrs={"data-asin": True})
+    products = [
+        d for d in all_asin_divs
+        if d.get("data-asin") and len(d.get("data-asin", "")) == 10
+        and d.get("data-component-type") in ("s-search-result", "s-search-results", None)
+    ]
 
-    for product in found[:max_items]:
+    # De-duplicate by ASIN (avoid nested div double-counting)
+    seen_asins = set()
+    unique_products = []
+    for p in products:
+        asin = p.get("data-asin", "")
+        if asin not in seen_asins:
+            seen_asins.add(asin)
+            unique_products.append(p)
+    products = unique_products
+
+    if products:
+        print(f"   📦 {category}: {len(products)} results")
+    else:
+        print(f"   📦 {category}: 0 results (page may be JS-rendered or blocked)")
+        return deals
+
+    for product in products[:max_items]:
         asin = product.get("data-asin", "")
         try:
-            # Title
-            title_el = (product.select_one("h2 a span") or
-                        product.select_one("span.a-size-medium.a-color-base.a-text-normal") or
-                        product.select_one("span.a-size-base-plus"))
-            title = title_el.get_text(strip=True) if title_el else None
+            # Title — try multiple selectors
+            title = None
+            for sel in [
+                "h2 a span",
+                "h2 span",
+                "span.a-size-medium.a-color-base.a-text-normal",
+                "span.a-size-base-plus.a-color-base.a-text-normal",
+                "span.a-text-normal",
+            ]:
+                el = product.select_one(sel)
+                if el and el.get_text(strip=True):
+                    title = el.get_text(strip=True)
+                    break
             if not title:
                 continue
 
             # Image
-            img_el = product.select_one("img.s-image")
+            img_el = product.select_one("img.s-image") or product.select_one("img[src*='amazon']")
             image_url = None
             if img_el:
                 image_url = img_el.get("src", "")
-                # Upgrade to higher res
-                image_url = re.sub(r"_AC_.*?_\.", "_AC_SL500_.", image_url)
+                image_url = re.sub(r"\._[A-Z]+\d+_\.", "._SL500_.", image_url) if image_url else None
 
-            # Deal price
-            price_el = product.select_one("span.a-price:not(.a-text-price) .a-offscreen")
-            deal_price = parse_price(price_el.get_text()) if price_el else None
+            # Deal price — try multiple selectors
+            deal_price = None
+            for sel in [
+                "span.a-price:not(.a-text-price) .a-offscreen",
+                "span.a-price .a-offscreen",
+            ]:
+                el = product.select_one(sel)
+                if el:
+                    p = parse_price(el.get_text())
+                    if p and p > 0:
+                        deal_price = p
+                        break
 
-            # Original / MRP
+            # MRP / Original price
             orig_el = product.select_one("span.a-price.a-text-price .a-offscreen")
             original_price = parse_price(orig_el.get_text()) if orig_el else None
 
             # Discount %
-            disc_el = (product.select_one("span.a-letter-space + span") or
-                       product.select_one("span[class*='savingPriceOverride']") or
-                       product.select_one("span.a-color-price"))
             discount_percent = None
-            if disc_el:
-                m = re.search(r"(\d+)%", disc_el.get_text())
-                if m:
-                    discount_percent = int(m.group(1))
+            for sel in [
+                "span[class*='savingPriceOverride']",
+                "span.a-color-price",
+                "span[class*='saving']",
+            ]:
+                el = product.select_one(sel)
+                if el:
+                    m = re.search(r"(\d+)%", el.get_text())
+                    if m:
+                        discount_percent = int(m.group(1))
+                        break
             if not discount_percent:
                 discount_percent = calc_discount(original_price, deal_price)
 
@@ -385,18 +427,11 @@ def fetch_amazon_sale_page(page_url: str, category: str, max_items: int = 8) -> 
             rating_count = rc_el.get_text(strip=True) if rc_el else None
 
             url = make_affiliate_url(asin)
-
             d = Deal(
-                title=title,
-                url=url,
-                source="Amazon India",
-                image_url=image_url,
-                deal_price=deal_price,
-                original_price=original_price,
-                discount_percent=discount_percent,
-                rating=rating,
-                rating_count=rating_count,
-                category=category,
+                title=title, url=url, source="Amazon India",
+                image_url=image_url, deal_price=deal_price,
+                original_price=original_price, discount_percent=discount_percent,
+                rating=rating, rating_count=rating_count, category=category,
             )
             d.deal_score = score_deal(d)
             deals.append(d)
@@ -408,14 +443,15 @@ def fetch_amazon_sale_page(page_url: str, category: str, max_items: int = 8) -> 
 
 
 # ── Source 2: Amazon Bestsellers + Product Page Enrichment ────────────────────
-# Scrape bestsellers, then visit each product page to get real MRP/discount
 
 BESTSELLER_PAGES = [
     ("https://www.amazon.in/gp/bestsellers/electronics/", "Electronics"),
     ("https://www.amazon.in/gp/bestsellers/computers/", "Computers"),
     ("https://www.amazon.in/gp/bestsellers/kitchen/", "Kitchen & Home"),
     ("https://www.amazon.in/gp/bestsellers/sports/", "Sports & Fitness"),
+    ("https://www.amazon.in/gp/bestsellers/apparel/", "Fashion"),
     ("https://www.amazon.in/gp/movers-and-shakers/electronics/", "Trending Electronics"),
+    ("https://www.amazon.in/gp/movers-and-shakers/kitchen/", "Trending Kitchen"),
 ]
 
 def fetch_amazon_bestsellers_enriched(page_url: str, category: str,

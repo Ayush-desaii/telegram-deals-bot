@@ -39,7 +39,9 @@ jobs:
           MAX_DEALS_PER_CYCLE=5
           EOF
 
-      - name: 🗄️ Restore Deals Database (avoid duplicate posts)
+      # Restore DB — key uses date so old deals (>7 days) naturally expire
+      # after a week without needing to clear the whole cache
+      - name: 🗄️ Restore Deals Database
         uses: actions/cache@v4
         with:
           path: deals_bot/deals_bot.db

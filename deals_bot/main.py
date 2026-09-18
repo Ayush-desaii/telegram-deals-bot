@@ -107,8 +107,8 @@ def startup() -> None:
     # Initialize database
     init_db()
 
-    # Cleanup old DB records (older than 30 days)
-    cleanup_old_records(days=30)
+    # Cleanup old DB records (keep 14 days of history)
+    cleanup_old_records(days=14)
 
     print(f"\n⚙️  Settings:")
     print(f"   Channel     : {config.CHANNEL_ID}")

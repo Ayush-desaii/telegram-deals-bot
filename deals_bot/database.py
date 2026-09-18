@@ -1,10 +1,16 @@
 """
 database.py - SQLite database to track posted deals (prevents duplicates)
+
+Deals expire after EXPIRY_DAYS so the same product can be reposted
+after enough time has passed (keeps the channel fresh).
 """
 import sqlite3
 import hashlib
 from datetime import datetime
 from config import DB_PATH
+
+# How many days before a posted deal becomes eligible for reposting
+EXPIRY_DAYS = 7
 
 
 def get_connection() -> sqlite3.Connection:
@@ -22,7 +28,7 @@ def init_db() -> None:
                 url_hash    TEXT UNIQUE NOT NULL,
                 title       TEXT,
                 source      TEXT,
-                posted_at   TEXT DEFAULT (datetime('now', 'localtime'))
+                posted_at   TEXT DEFAULT (datetime('now'))
             )
         """)
         conn.commit()
@@ -30,32 +36,42 @@ def init_db() -> None:
 
 
 def make_hash(url: str) -> str:
-    """Create a short hash from a URL to use as unique key."""
-    return hashlib.md5(url.strip().encode()).hexdigest()
+    """Create a short hash from a URL (based on ASIN only, so variant URLs dedup correctly)."""
+    import re
+    asin_match = re.search(r"/dp/([A-Z0-9]{10})", url)
+    key = asin_match.group(1) if asin_match else url.strip()
+    return hashlib.md5(key.encode()).hexdigest()
 
 
 def is_already_posted(url: str) -> bool:
-    """Check if a deal URL has already been posted."""
+    """
+    Check if a deal URL has been posted recently (within EXPIRY_DAYS).
+    Older records are treated as fresh — allowing weekly reposts.
+    """
     url_hash = make_hash(url)
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT 1 FROM posted_deals WHERE url_hash = ?", (url_hash,)
+            """SELECT 1 FROM posted_deals
+               WHERE url_hash = ?
+               AND posted_at > datetime('now', ?)""",
+            (url_hash, f"-{EXPIRY_DAYS} days"),
         ).fetchone()
     return row is not None
 
 
 def mark_as_posted(url: str, title: str, source: str) -> None:
-    """Mark a deal URL as posted so it won't be posted again."""
+    """Mark a deal URL as posted. Uses INSERT OR REPLACE to reset the timer."""
     url_hash = make_hash(url)
     with get_connection() as conn:
-        try:
-            conn.execute(
-                "INSERT INTO posted_deals (url_hash, title, source) VALUES (?, ?, ?)",
-                (url_hash, title, source),
-            )
-            conn.commit()
-        except sqlite3.IntegrityError:
-            pass  # Already exists, ignore
+        conn.execute(
+            """INSERT INTO posted_deals (url_hash, title, source, posted_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(url_hash) DO UPDATE SET
+                   posted_at = datetime('now'),
+                   title = excluded.title""",
+            (url_hash, title, source),
+        )
+        conn.commit()
 
 
 def get_total_posted() -> int:
@@ -65,11 +81,11 @@ def get_total_posted() -> int:
     return row["cnt"] if row else 0
 
 
-def cleanup_old_records(days: int = 30) -> None:
+def cleanup_old_records(days: int = 60) -> None:
     """Delete records older than X days to keep DB small."""
     with get_connection() as conn:
         conn.execute(
-            "DELETE FROM posted_deals WHERE posted_at < datetime('now', ?, 'localtime')",
+            "DELETE FROM posted_deals WHERE posted_at < datetime('now', ?)",
             (f"-{days} days",),
         )
         conn.commit()
