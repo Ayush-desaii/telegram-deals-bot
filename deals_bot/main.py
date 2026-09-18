@@ -23,7 +23,7 @@ from config import validate_config
 from database import init_db, is_already_posted, mark_as_posted, get_total_posted, cleanup_old_records
 from fetcher import fetch_all_deals, filter_deals, Deal
 from formatter import format_deal_message
-from poster import post_deal, post_startup_message, test_connection
+from poster import post_deal, post_startup_message, test_connection, pin_deal_message
 
 
 # ── Core Job ──────────────────────────────────────────────────────────────────
@@ -34,7 +34,8 @@ def run_deal_cycle(test_mode: bool = False) -> None:
     1. Fetch deals from all sources
     2. Filter by discount threshold
     3. Skip already-posted deals
-    4. Post top N new deals
+    4. Post top N new deals ranked by score
+    5. Auto-pin the hottest deal of the day
     """
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*50}")
@@ -61,13 +62,15 @@ def run_deal_cycle(test_mode: bool = False) -> None:
         print("ℹ️  All qualifying deals already posted. Nothing new to post.")
         return
 
-    # Step 4: Shuffle & pick top N
-    random.shuffle(new_deals)
+    # Step 4: Sort by deal_score (best discount, rating, & price first)
+    new_deals.sort(key=lambda d: getattr(d, "deal_score", 0), reverse=True)
     to_post: list[Deal] = new_deals[:config.MAX_DEALS_PER_CYCLE]
 
     # Step 5: Post (or preview in test mode)
     posted_count = 0
-    for deal in to_post:
+    top_deal_pinned = False
+
+    for i, deal in enumerate(to_post):
         if test_mode:
             print("\n" + "─" * 50)
             print("📋 PREVIEW (not posting):")
@@ -75,10 +78,16 @@ def run_deal_cycle(test_mode: bool = False) -> None:
             print(f"   🔗 URL: {deal.url}")
             print(f"   🖼️  Image: {deal.image_url or 'None'}")
         else:
-            success = post_deal(deal)
-            if success:
+            msg_id = post_deal(deal)
+            if msg_id:
                 mark_as_posted(deal.url, deal.title, deal.source)
                 posted_count += 1
+
+                # Auto-pin the single hottest deal of the cycle (>=60% off)
+                if not top_deal_pinned and deal.discount_percent and deal.discount_percent >= 60:
+                    pin_deal_message(msg_id)
+                    top_deal_pinned = True
+
                 # Small delay between posts to avoid flooding
                 time.sleep(3)
 

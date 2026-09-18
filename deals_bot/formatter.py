@@ -73,8 +73,12 @@ def format_deal_message(deal: Deal) -> str:
     emoji = get_emoji(deal)
     lines = []
 
-    # ── Discount Badge (most prominent) ───────────────────
-    if deal.discount_percent and deal.discount_percent >= 10:
+    # ── Discount / Price Badge (most prominent) ───────────
+    if deal.deal_price and deal.deal_price <= 99:
+        lines.append("⚡ <b>UNDER ₹99 MEGA LOOT!</b> ⚡")
+    elif deal.deal_price and deal.deal_price <= 199:
+        lines.append("⚡ <b>UNDER ₹199 BUDGET DEAL!</b> ⚡")
+    elif deal.discount_percent and deal.discount_percent >= 10:
         fire = get_fire_badge(deal.discount_percent)
         lines.append(f"<b>━━━  {deal.discount_percent}% OFF  ━━━</b> {fire}")
     else:
@@ -202,6 +206,11 @@ def build_hashtags(deal: Deal) -> str:
         tags.append("#BigOff")
     elif disc >= 30:
         tags.append("#GoodDeal")
+
+    if deal.deal_price and deal.deal_price <= 99:
+        tags.append("#Under99")
+    elif deal.deal_price and deal.deal_price <= 199:
+        tags.append("#Under199")
 
     text = f"{deal.title or ''} {deal.category or ''}".lower()
 

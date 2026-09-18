@@ -71,9 +71,17 @@ def add_watermark(image_url: str, deal) -> Optional[io.BytesIO]:
 
         handle = get_channel_handle()
 
-        # ── 1. Top-Left Badge (Discount or Loot Deal) ──────────────────────
+        # ── 1. Top-Left Badge (Under ₹99/₹199, Discount %, or Loot) ───────
         disc = getattr(deal, "discount_percent", None)
-        if disc and disc >= 10:
+        price = getattr(deal, "deal_price", None)
+
+        if price and price <= 99:
+            badge_text = " UNDER ₹99 LOOT "
+            badge_bg = (124, 58, 237, 245)    # Purple Royal Loot
+        elif price and price <= 199:
+            badge_text = " UNDER ₹199 LOOT "
+            badge_bg = (217, 119, 6, 245)     # Amber / Gold Loot
+        elif disc and disc >= 10:
             badge_text = f" {disc}% OFF "
             badge_bg = (229, 9, 20, 245)      # Vibrant Red
         else:

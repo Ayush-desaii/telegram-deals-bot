@@ -47,10 +47,10 @@ def send_photo_with_caption(
     photo: Union[str, io.BytesIO, bytes],
     caption: str,
     reply_markup: Optional[dict] = None
-) -> bool:
+) -> Optional[int]:
     """
     Send product photo with deal caption and optional inline buttons.
-    Supports either direct image URL (str) or in-memory watermarked image (io.BytesIO).
+    Returns message_id on success, None on failure.
     """
     if len(caption) > 1024:
         caption = caption[:1020] + "..."
@@ -89,18 +89,18 @@ def send_photo_with_caption(
 
         data = resp.json()
         if data.get("ok"):
-            return True
+            return data["result"]["message_id"]
 
         print(f"⚠️  sendPhoto failed: {data.get('description')}")
-        return False
+        return None
 
     except Exception as e:
         print(f"❌ sendPhoto error: {e}")
-        return False
+        return None
 
 
-def send_message(text: str, reply_markup: Optional[dict] = None) -> bool:
-    """Send a text-only message with optional inline buttons."""
+def send_message(text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
+    """Send a text-only message with optional inline buttons. Returns message_id on success."""
     if len(text) > 4096:
         text = text[:4090] + "..."
 
@@ -118,20 +118,40 @@ def send_message(text: str, reply_markup: Optional[dict] = None) -> bool:
         resp = requests.post(url, json=payload, timeout=15)
         data = resp.json()
         if data.get("ok"):
-            return True
+            return data["result"]["message_id"]
         print(f"⚠️  sendMessage failed: {data.get('description')}")
-        return False
+        return None
     except Exception as e:
         print(f"❌ sendMessage error: {e}")
         return False
 
 
-def post_deal(deal: Deal) -> bool:
+def pin_deal_message(message_id: int) -> bool:
+    """Pins a hot deal of the day to the top of the channel."""
+    url = f"{TELEGRAM_API}/pinChatMessage"
+    payload = {
+        "chat_id": config.CHANNEL_ID,
+        "message_id": message_id,
+        "disable_notification": False,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        data = resp.json()
+        if data.get("ok"):
+            print(f"📌 Pinned top deal to channel header (Message #{message_id})!")
+            return True
+        # If bot does not have pin permissions, don't crash
+        print(f"ℹ️  Pin message note: {data.get('description')}")
+        return False
+    except Exception as e:
+        print(f"⚠️  pin error: {e}")
+        return False
+
+
+def post_deal(deal: Deal) -> Optional[int]:
     """
     Post a deal to the channel with branded image and inline action buttons.
-    1. Try sending branded watermarked image with buttons
-    2. If watermarking fails, fallback to raw Amazon image with buttons
-    3. If image send fails, fallback to rich text message with buttons
+    Returns message_id on success, None on failure.
     """
     caption = format_deal_message(deal)
     keyboard = build_deal_keyboard(deal)
@@ -140,24 +160,25 @@ def post_deal(deal: Deal) -> bool:
         # Tier 1: Branded Watermarked Photo
         watermarked_buf = add_watermark(deal.image_url, deal)
         if watermarked_buf:
-            success = send_photo_with_caption(watermarked_buf, caption, reply_markup=keyboard)
-            if success:
+            msg_id = send_photo_with_caption(watermarked_buf, caption, reply_markup=keyboard)
+            if msg_id:
                 print(f"✅ Posted with branded watermark & buttons: {deal.title[:55]}...")
-                return True
+                return msg_id
             print("⚠️  Branded photo upload failed, attempting raw image URL fallback...")
 
         # Tier 2: Raw Image URL Fallback
-        success = send_photo_with_caption(deal.image_url, caption, reply_markup=keyboard)
-        if success:
+        msg_id = send_photo_with_caption(deal.image_url, caption, reply_markup=keyboard)
+        if msg_id:
             print(f"✅ Posted with raw image & buttons: {deal.title[:55]}...")
-            return True
+            return msg_id
 
     # Tier 3: Rich Text Fallback
     message = format_text_only_message(deal)
-    success = send_message(message, reply_markup=keyboard)
-    if success:
+    msg_id = send_message(message, reply_markup=keyboard)
+    if msg_id:
         print(f"✅ Posted as text & buttons: {deal.title[:55]}...")
-    return success
+        return msg_id
+    return None
 
 
 def post_startup_message() -> None:
