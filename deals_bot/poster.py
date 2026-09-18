@@ -1,9 +1,11 @@
 """
-poster.py - Posts Amazon deals to Telegram channel with watermarked image + metadata
+poster.py - Posts Amazon deals to Telegram channel with watermarked image, metadata, and inline buttons
 """
 import io
+import json
 import requests
-from typing import Union
+from typing import Union, Optional
+from urllib.parse import quote
 from fetcher import Deal
 from formatter import format_deal_message, format_text_only_message
 from watermark import add_watermark
@@ -12,12 +14,44 @@ import config
 TELEGRAM_API = f"https://api.telegram.org/bot{config.BOT_TOKEN}"
 
 
-def send_photo_with_caption(photo: Union[str, io.BytesIO, bytes], caption: str) -> bool:
+def build_deal_keyboard(deal: Deal) -> dict:
     """
-    Send product photo with deal caption.
+    Builds attractive Telegram inline keyboard buttons:
+    1. Direct 'BUY NOW ON AMAZON' button with affiliate link
+    2. 1-Click 'SHARE DEAL' button to trigger Telegram's native share sheet
+    """
+    ch = getattr(config, "CHANNEL_ID", "")
+    handle = ch.lstrip("@") if ch and ch.startswith("@") else "ApexLootDealss"
+    channel_link = f"https://t.me/{handle}"
+
+    disc_str = f"🔥 {deal.discount_percent}% OFF" if deal.discount_percent else "🔥 LOOT DEAL"
+    price_str = f"₹{int(deal.deal_price):,}" if deal.deal_price else ""
+    price_info = f" at {price_str}" if price_str else ""
+    share_text = f"{disc_str}! {deal.title[:60]}...{price_info}\n\n👉 Join @{handle} for more daily loot deals!"
+
+    share_url = f"https://t.me/share/url?url={quote(channel_link, safe='')}&text={quote(share_text, safe='')}"
+
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🛒 BUY NOW ON AMAZON →", "url": deal.url}
+            ],
+            [
+                {"text": "📢 SHARE DEAL WITH FRIENDS", "url": share_url}
+            ]
+        ]
+    }
+
+
+def send_photo_with_caption(
+    photo: Union[str, io.BytesIO, bytes],
+    caption: str,
+    reply_markup: Optional[dict] = None
+) -> bool:
+    """
+    Send product photo with deal caption and optional inline buttons.
     Supports either direct image URL (str) or in-memory watermarked image (io.BytesIO).
     """
-    # Telegram caption limit is 1024 characters
     if len(caption) > 1024:
         caption = caption[:1020] + "..."
 
@@ -25,7 +59,6 @@ def send_photo_with_caption(photo: Union[str, io.BytesIO, bytes], caption: str) 
 
     try:
         if isinstance(photo, (io.BytesIO, bytes)):
-            # Sending watermarked image buffer as multipart file
             if isinstance(photo, io.BytesIO):
                 photo.seek(0)
                 file_bytes = photo.read()
@@ -38,15 +71,20 @@ def send_photo_with_caption(photo: Union[str, io.BytesIO, bytes], caption: str) 
                 "caption": caption,
                 "parse_mode": "HTML",
             }
+            if reply_markup:
+                data["reply_markup"] = json.dumps(reply_markup)
+
             resp = requests.post(url, data=data, files=files, timeout=30)
         else:
-            # Sending by remote image URL string
             payload = {
                 "chat_id": config.CHANNEL_ID,
                 "photo": photo,
                 "caption": caption,
                 "parse_mode": "HTML",
             }
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+
             resp = requests.post(url, json=payload, timeout=20)
 
         data = resp.json()
@@ -61,8 +99,8 @@ def send_photo_with_caption(photo: Union[str, io.BytesIO, bytes], caption: str) 
         return False
 
 
-def send_message(text: str) -> bool:
-    """Send a text-only message."""
+def send_message(text: str, reply_markup: Optional[dict] = None) -> bool:
+    """Send a text-only message with optional inline buttons."""
     if len(text) > 4096:
         text = text[:4090] + "..."
 
@@ -73,6 +111,9 @@ def send_message(text: str) -> bool:
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+
     try:
         resp = requests.post(url, json=payload, timeout=15)
         data = resp.json()
@@ -87,34 +128,35 @@ def send_message(text: str) -> bool:
 
 def post_deal(deal: Deal) -> bool:
     """
-    Post a deal to the channel.
-    1. Try sending branded watermarked image with caption
-    2. If watermarking fails, fallback to raw Amazon image with caption
-    3. If image send fails, fallback to rich text message with link preview
+    Post a deal to the channel with branded image and inline action buttons.
+    1. Try sending branded watermarked image with buttons
+    2. If watermarking fails, fallback to raw Amazon image with buttons
+    3. If image send fails, fallback to rich text message with buttons
     """
     caption = format_deal_message(deal)
+    keyboard = build_deal_keyboard(deal)
 
     if deal.image_url:
         # Tier 1: Branded Watermarked Photo
         watermarked_buf = add_watermark(deal.image_url, deal)
         if watermarked_buf:
-            success = send_photo_with_caption(watermarked_buf, caption)
+            success = send_photo_with_caption(watermarked_buf, caption, reply_markup=keyboard)
             if success:
-                print(f"✅ Posted with branded watermark: {deal.title[:55]}...")
+                print(f"✅ Posted with branded watermark & buttons: {deal.title[:55]}...")
                 return True
             print("⚠️  Branded photo upload failed, attempting raw image URL fallback...")
 
         # Tier 2: Raw Image URL Fallback
-        success = send_photo_with_caption(deal.image_url, caption)
+        success = send_photo_with_caption(deal.image_url, caption, reply_markup=keyboard)
         if success:
-            print(f"✅ Posted with raw image: {deal.title[:55]}...")
+            print(f"✅ Posted with raw image & buttons: {deal.title[:55]}...")
             return True
 
     # Tier 3: Rich Text Fallback
     message = format_text_only_message(deal)
-    success = send_message(message)
+    success = send_message(message, reply_markup=keyboard)
     if success:
-        print(f"✅ Posted as text: {deal.title[:55]}...")
+        print(f"✅ Posted as text & buttons: {deal.title[:55]}...")
     return success
 
 
