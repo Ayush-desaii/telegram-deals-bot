@@ -1,0 +1,3 @@
+# One full Amazon India product URL per line; up to 20 distinct products.
+# These products stay on the watchlist even when search no longer finds them.
+# Example (replace with your product): https://www.amazon.in/dp/B012345678

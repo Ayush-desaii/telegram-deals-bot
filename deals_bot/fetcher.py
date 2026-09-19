@@ -213,7 +213,7 @@ def score_deal(deal: Deal) -> int:
 
 # ── Amazon Product Page Scraper ────────────────────────────────────────────────
 
-def scrape_product_page(url: str) -> Optional[dict]:
+def scrape_product_page(url: str, response=None) -> Optional[dict]:
     """
     Visit an Amazon product page and extract full deal metadata.
     This is called for bestseller items to get their real MRP + discount.
@@ -224,7 +224,7 @@ def scrape_product_page(url: str) -> Optional[dict]:
         return None
     clean_url = f"https://www.amazon.in/dp/{asin}"
 
-    resp = safe_get(clean_url)
+    resp = response if response is not None else safe_get(clean_url)
     if not resp:
         return None
 

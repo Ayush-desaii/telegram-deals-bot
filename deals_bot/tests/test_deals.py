@@ -18,6 +18,7 @@ import config
 import fetcher
 import main
 import poster
+from discovery import ProductCandidate, SourceResult, VerificationResult
 from database import Database, make_hash, timestamp, utcnow
 from formatter import format_deal_message, fmt_price
 from product import amazon_asin, paise
@@ -277,8 +278,11 @@ class MessageTests(IsolatedTest):
 
 class PipelineTests(IsolatedTest):
     def run_cycle(self, verify=None, save=None, preview=False, send=None):
-        with patch("main.fetch_all_deals", return_value=[deal()]), \
-                patch("main.verify_deal", side_effect=verify or (lambda item: deal())), \
+        def checked(item, client):
+            fresh = verify(item) if verify else deal()
+            return VerificationResult("verified" if fresh else "unavailable", fresh)
+        with patch("main.discover", return_value=[SourceResult("test", "successful", [ProductCandidate.from_deal(deal(), "test")])]), \
+                patch("main.verify_candidate", side_effect=checked), \
                 patch("main.post_deal", side_effect=send or (lambda item: 123)) as post, \
                 patch("main.time.sleep"):
             stats = main.run_deal_cycle(self.db, save or (lambda: None), test_mode=preview)
@@ -337,8 +341,8 @@ class PipelineTests(IsolatedTest):
 
     def test_uncertain_sends_count_against_two_post_limit(self):
         items = [deal(asin=asin) for asin in (ASIN, "B999999999", "B888888888")]
-        with patch("main.fetch_all_deals", return_value=items), \
-                patch("main.verify_deal", side_effect=lambda item: deal(asin=item.asin)), \
+        with patch("main.discover", return_value=[SourceResult("test", "successful", [ProductCandidate.from_deal(item, "test") for item in items])]), \
+                patch("main.verify_candidate", side_effect=lambda item, client: VerificationResult("verified", deal(asin=item.asin))), \
                 patch("main.post_deal", side_effect=poster.AmbiguousDelivery()) as send:
             stats = main.run_deal_cycle(self.db, lambda: None)
         self.assertEqual(send.call_count, 2)

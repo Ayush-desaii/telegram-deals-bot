@@ -53,11 +53,20 @@ jobs:
           key: deals-db-preview-${{ github.run_id }}
           restore-keys: deals-db-
       - name: Verify production sources without posting
-        run: python -u deals_bot/main.py --test --git-state --require-verified
+        run: python -u deals_bot/main.py --test --git-state --require-verified --report-dir "$RUNNER_TEMP/deals-report"
         env:
           AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
           MIN_DISCOUNT_PERCENT: '40'
           MAX_DEALS_PER_CYCLE: '2'
+
+      - name: Upload preview report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deals-preview-report
+          path: ${{ runner.temp }}/deals-report/
+          retention-days: 14
+          if-no-files-found: warn
       - name: Validate production settings without contacting Telegram
         working-directory: deals_bot
         run: python -c "import config; raise SystemExit(0 if config.validate_config() else 1)"
@@ -90,7 +99,7 @@ jobs:
           key: deals-db-bootstrap-${{ github.run_id }}
           restore-keys: deals-db-
       - name: Fetch, verify, and post with durable state
-        run: python -u deals_bot/main.py --now --git-state
+        run: python -u deals_bot/main.py --now --git-state --report-dir "$RUNNER_TEMP/deals-report"
         env:
           DB_PATH: ${{ runner.temp }}/deals-state.sqlite
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -99,3 +108,12 @@ jobs:
           DEALS_APPROVED_SHA: ${{ vars.DEALS_APPROVED_SHA }}
           MIN_DISCOUNT_PERCENT: '40'
           MAX_DEALS_PER_CYCLE: '2'
+
+      - name: Upload production report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deals-production-report
+          path: ${{ runner.temp }}/deals-report/
+          retention-days: 14
+          if-no-files-found: warn

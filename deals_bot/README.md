@@ -41,6 +41,9 @@ Preview uses a temporary copy of the database, allows missing Telegram/affiliate
 credentials, and never sends messages or writes production state. To preview the
 current production state branch, add `--git-state`. Add `--require-verified` to
 fail the preview if no product can be verified, even if discovery returns data.
+Release previews with `--require-verified` may check tracked products before their
+due time, on the temporary copy only, to validate live access without changing
+production backoff or schedules.
 
 `DB_PATH` may set an absolute path; otherwise the file lives beside the bot at
 `deals_bot/deals_bot.db`, independent of the working directory. The default CLI
@@ -49,6 +52,53 @@ production command. Do not run it locally alongside the scheduled production job
 Plain `--now` uses local SQLite state only and does not coordinate with GitHub.
 
 ## Durable state
+
+### Watchlist and source health
+
+Successfully verified products automatically enter a persistent watchlist, even
+when their current discount is insufficient. They are checked again when due,
+without needing to appear in search results. Add full Amazon India product URLs
+to `deals_bot/watchlist.txt`, one per line, to retain up to 20 manual products.
+Blank lines and lines beginning with `#` are ignored. URL variants deduplicate
+by ASIN. Removing a line removes manual priority; automatic retention can continue.
+
+The watchlist holds at most 100 products. Manual entries are retained. Automatic
+entries expire after 30 days without successful verification; at capacity the
+oldest successfully checked automatic entry is replaced. Healthy entries are due
+after six hours, unavailable items after 24 hours, and source errors back off for
+six, twelve, then twenty-four hours. Overdue time sorts first, followed by manual
+priority, history days, and ASIN. Errors never erase existing price history.
+
+Each cycle checks up to 30 unique products: 20 watchlist slots and 10 new discovery
+slots, with unused capacity shared. Sources are merged by ASIN before verification.
+Discovery downloads listings/feed pages only (short links use HEAD resolution);
+the central verifier fetches product pages. At most four top eligible products
+receive a final refresh before up to two posting attempts.
+
+Collection and verification share a fifteen-minute budget. Discovery is capped at
+five minutes to leave time for the watchlist; initial checks reserve the final two
+minutes for refreshes. Work that does not fit is `budget_skipped`, not a source
+failure. Not-due products stay deferred even when rediscovered. The optional legacy
+PA API is marked disabled in the active bounded pipeline; existing Amazon search,
+bestseller and Reddit sources remain enabled.
+
+Each GitHub run has a readable job summary and a `deals-preview-report` or
+`deals-production-report` artifact retained for fourteen days. Locally:
+
+```sh
+python deals_bot/main.py --test --report-dir ./reports
+```
+
+`report.json` and `report.md` show unique-product totals, per-source discovery
+health, verification results, watchlist counts, and rejection reasons. Source
+counts overlap if several sources found the same ASIN. A zero-post cycle can be
+healthy (for example, duplicate suppression or insufficient discounts). A cycle
+whose attempted verification all failed due to source errors fails after saving
+available state. Reports contain no credentials, request headers or product URLs;
+no health reports are sent to the channel. Production summaries and source counts
+are retained in SQLite for ninety days. Preview reports are not persisted remotely.
+
+### State storage and migration
 
 The `codex/deals-state` branch holds only `deals_bot.db`, separately from application
 code. It has the same visibility as the repository: product prices, post titles,
@@ -100,3 +150,12 @@ revert the application commit, test and preview the resulting commit, then appro
 that SHA. Preserve the state branch and pending attempts. Code must understand the
 state schema before posting; the old cache-only release must not be restarted
 against stale state.
+
+This release adds schema version 2 without deleting existing history or posting
+attempts. It bootstraps the watchlist from recent verified ASIN observations, not
+irreversible legacy URL hashes. The state branch retains the pre-migration commit
+as an ancestor; its SHA is also included in the first migrated cycle's report.
+For recovery, preserve that snapshot and use code compatible with schema version
+2; the previous version-1 binary deliberately refuses a newer database. A migrated
+database must not be replaced with an old snapshot after new sends without first
+reconciling those sends, because that could lose duplicate protection.

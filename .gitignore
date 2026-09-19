@@ -5,6 +5,7 @@ deals_bot/.env
 deals_bot/deals_bot.db
 *.sqlite
 *.db-journal
+reports/
 
 # Python cache
 __pycache__/

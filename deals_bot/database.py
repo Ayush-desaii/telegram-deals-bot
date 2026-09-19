@@ -35,7 +35,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError("State schema is newer than this bot")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS posted_deals (
@@ -56,8 +56,35 @@ class Database:
                     message_id INTEGER, title TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS attempts_product ON posting_attempts(asin, attempted_at);
-                PRAGMA user_version=1;
             """)
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    asin TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL, last_check_at TEXT,
+                    last_success_at TEXT, next_check_at TEXT NOT NULL,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    manual INTEGER NOT NULL DEFAULT 0 CHECK(manual IN (0,1))
+                );
+                CREATE TABLE IF NOT EXISTS cycle_reports (
+                    cycle_id TEXT PRIMARY KEY, started_at TEXT NOT NULL,
+                    mode TEXT NOT NULL, status TEXT NOT NULL, report_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS source_reports (
+                    cycle_id TEXT NOT NULL, source_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL, report_json TEXT NOT NULL,
+                    PRIMARY KEY(cycle_id, source_id)
+                );
+            """)
+            if version < 2:
+                conn.execute("""INSERT OR IGNORE INTO watchlist
+                    (asin,url,title,first_seen_at,last_check_at,last_success_at,next_check_at)
+                    SELECT asin,'https://www.amazon.in/dp/' || asin,asin,MIN(observed_at),
+                           MAX(observed_at),MAX(observed_at),datetime(MAX(observed_at),'+6 hours')
+                    FROM price_observations WHERE verified=1 AND length(asin)=10
+                    AND asin NOT GLOB '*[^A-Z0-9]*'
+                    GROUP BY asin HAVING MAX(observed_at)>=datetime('now','-30 days')
+                    ORDER BY MAX(observed_at) DESC,asin LIMIT 100""")
+            conn.execute("PRAGMA user_version=2")
 
     def observe(self, deal, now=None):
         price = paise(deal.deal_price)
@@ -81,12 +108,15 @@ class Database:
         return (int(median([r[0] for r in rows])) if len(rows) >= 7 else None, len(rows))
 
     def can_post(self, deal, now=None):
+        return self.posting_reason(deal, now) == "eligible"
+
+    def posting_reason(self, deal, now=None):
         now = now or utcnow()
         with self.connection() as conn:
             pending = conn.execute("SELECT 1 FROM posting_attempts WHERE asin=? AND status='pending'",
                                    (deal.asin,)).fetchone()
             if pending:
-                return False
+                return "pending_attempt"
             latest = conn.execute("""SELECT * FROM posting_attempts WHERE asin=?
                 ORDER BY attempted_at DESC,id DESC LIMIT 1""", (deal.asin,)).fetchone()
             legacy = conn.execute("SELECT posted_at FROM posted_deals WHERE url_hash=?",
@@ -96,14 +126,14 @@ class Database:
         if latest:
             elapsed = now - datetime.fromisoformat(latest["attempted_at"]).replace(tzinfo=timezone.utc)
             if elapsed < timedelta(hours=24):
-                return False
+                return "duplicate_cooldown"
         # Legacy records have no reliable price: never manufacture a repost threshold.
         if legacy and (not sent or legacy["posted_at"] > sent["attempted_at"]):
             if legacy["posted_at"] > timestamp(now - timedelta(days=7)):
-                return False
+                return "duplicate_cooldown"
         if sent and sent["attempted_at"] > timestamp(now - timedelta(days=7)):
-            return meaningful_drop(sent["price_paise"], paise(deal.deal_price))
-        return True
+            return "eligible" if meaningful_drop(sent["price_paise"], paise(deal.deal_price)) else "duplicate_cooldown"
+        return "eligible"
 
     def begin_attempt(self, deal, now=None):
         with self.connection() as conn:
@@ -126,6 +156,20 @@ class Database:
         with self.connection() as conn:
             conn.execute("DELETE FROM price_observations WHERE observed_at<?",
                          (timestamp((now or utcnow()) - timedelta(days=90)),))
+            cutoff = timestamp((now or utcnow()) - timedelta(days=90))
+            conn.execute("DELETE FROM cycle_reports WHERE started_at<?", (cutoff,))
+            conn.execute("DELETE FROM source_reports WHERE started_at<?", (cutoff,))
+
+    def save_report(self, report):
+        import json
+        with self.connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO cycle_reports VALUES (?,?,?,?,?)",
+                         (report["cycle_id"], report["started_at"], report["mode"],
+                          report["status"], json.dumps(report, sort_keys=True)))
+            for source in report["sources"]:
+                conn.execute("INSERT OR REPLACE INTO source_reports VALUES (?,?,?,?)",
+                             (report["cycle_id"], source["source_id"], report["started_at"],
+                              json.dumps(source, sort_keys=True)))
 
     def import_legacy(self, paths):
         for path in paths:
