@@ -1,174 +1,133 @@
-"""
-main.py - Entry point. Runs the deal bot with automatic scheduling.
-
-Usage:
-    python main.py          -> Start the bot (runs forever)
-    python main.py --test   -> Fetch & preview 3 deals WITHOUT posting
-    python main.py --now    -> Fetch & post deals once immediately, then exit
-"""
+"""Verified deals pipeline. --test is isolated and never sends or persists state."""
+import argparse
+import json
+import os
+from pathlib import Path
 import sys
+import tempfile
 import time
-import random
-from datetime import datetime
 
-# Fix Windows terminal encoding for emoji support
-if sys.stdout.encoding != "utf-8":
+if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from apscheduler.schedulers.blocking import BlockingScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-
 import config
-from config import validate_config
-from database import init_db, is_already_posted, mark_as_posted, get_total_posted, cleanup_old_records
-from fetcher import fetch_all_deals, filter_deals, Deal
+from database import Database
+from fetcher import fetch_all_deals, filter_deals, verify_deal
 from formatter import format_deal_message
-from poster import post_deal, post_startup_message, test_connection, pin_deal_message
+from poster import post_deal, AmbiguousDelivery
+from quality import eligible, ranking
+from state_store import GitStateStore, preview_database
 
 
-# ── Core Job ──────────────────────────────────────────────────────────────────
+def run_deal_cycle(db, save_state, test_mode=False):
+    stats = dict(discovered=0, valid=0, verified=0, qualified=0, attempted=0, posted=0, pending=0)
+    discovered = fetch_all_deals()
+    stats["discovered"] = len(discovered)
+    candidates = filter_deals(discovered)
+    stats["valid"] = len(candidates)
+    for deal in candidates:
+        db.observe(deal)
+    db.cleanup()
+    save_state()
 
-def run_deal_cycle(test_mode: bool = False) -> None:
-    """
-    Main cycle:
-    1. Fetch deals from all sources
-    2. Filter by discount threshold
-    3. Skip already-posted deals
-    4. Post top N new deals ranked by score
-    5. Auto-pin the hottest deal of the day
-    """
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n{'='*50}")
-    print(f"⏰ Cycle started at {now}")
-    print(f"{'='*50}")
+    verified = []
+    seen = set()
+    for deal in candidates:
+        if deal.asin in seen:
+            continue
+        seen.add(deal.asin)
+        fresh = verify_deal(deal)
+        if fresh is None:
+            continue
+        stats["verified"] += 1
+        db.observe(fresh)
+        if eligible(fresh, db) and db.can_post(fresh):
+            verified.append(fresh)
+    save_state()
+    stats["qualified"] = len(verified)
 
-    # Step 1: Fetch
-    all_deals = fetch_all_deals()
-    print(f"\n📦 Total deals fetched: {len(all_deals)}")
-
-    # Step 2: Filter by discount %
-    filtered = filter_deals(all_deals)
-    print(f"🔍 After discount filter (≥{config.MIN_DISCOUNT_PERCENT}%): {len(filtered)} deals")
-
-    if not filtered:
-        print("⚠️  No qualifying deals found this cycle.")
-        return
-
-    # Step 3: Remove already-posted deals
-    new_deals = [d for d in filtered if not is_already_posted(d.url)]
-    print(f"🆕 New (not yet posted): {len(new_deals)} deals")
-
-    if not new_deals:
-        print("ℹ️  All qualifying deals already posted. Nothing new to post.")
-        return
-
-    # Step 4: Sort by deal_score (best discount, rating, & price first)
-    new_deals.sort(key=lambda d: getattr(d, "deal_score", 0), reverse=True)
-    to_post: list[Deal] = new_deals[:config.MAX_DEALS_PER_CYCLE]
-
-    # Step 5: Post (or preview in test mode)
-    posted_count = 0
-    top_deal_pinned = False
-
-    for i, deal in enumerate(to_post):
+    # Revisit each qualifying candidate after collection; prices may have moved
+    # during a long discovery run. Rank using only these refreshed snapshots.
+    ready = []
+    for deal in verified:
+        fresh = verify_deal(deal)
+        if fresh is not None:
+            db.observe(fresh)
+            if eligible(fresh, db) and db.can_post(fresh):
+                ready.append(fresh)
+    save_state()
+    for deal in sorted(ready, key=ranking):
+        if max(stats["posted"], stats["attempted"]) >= min(config.MAX_DEALS_PER_CYCLE, 2):
+            break
+        # Snapshots expire after five minutes; do not post stale queued products.
+        if not eligible(deal, db) or not db.can_post(deal):
+            continue
+        caption = format_deal_message(deal)
         if test_mode:
-            print("\n" + "─" * 50)
-            print("📋 PREVIEW (not posting):")
-            print(format_deal_message(deal))
-            print(f"   🔗 URL: {deal.url}")
-            print(f"   🖼️  Image: {deal.image_url or 'None'}")
+            print("PREVIEW (not posted):\n" + caption)
+            stats["posted"] += 1
+            continue
+        attempt = db.begin_attempt(deal)
+        save_state()  # Durable reservation is mandatory BEFORE the network send.
+        stats["attempted"] += 1
+        try:
+            message_id = post_deal(deal)
+        except AmbiguousDelivery:
+            stats["pending"] += 1
+            print(f"Delivery uncertain for {deal.asin}; pending attempt retained for review")
+            continue
+        db.finish_attempt(attempt, deal, message_id)
+        save_state()  # Failure here stops further sends; remote pending is safe.
+        if message_id:
+            stats["posted"] += 1
+        time.sleep(3)
+    if test_mode:
+        stats["previewed"] = stats["posted"]
+        stats["posted"] = 0
+    print("CYCLE_RESULT " + json.dumps(stats, sort_keys=True))
+    return stats
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--test", "--preview", action="store_true", dest="preview")
+    parser.add_argument("--now", action="store_true", help="Run once (also the default)")
+    parser.add_argument("--git-state", action="store_true", help="Restore/save the repository state branch")
+    parser.add_argument("--require-verified", action="store_true", help="Fail a preview if no product can be verified")
+    args = parser.parse_args()
+    if not config.validate_config(production=not args.preview):
+        return 1
+    if os.getenv("GITHUB_ACTIONS") == "true" and not args.preview:
+        if not args.git_state:
+            raise RuntimeError("GitHub production requires durable Git state")
+        if os.getenv("DEALS_APPROVED_SHA") != os.getenv("GITHUB_SHA"):
+            raise RuntimeError("This commit has not passed the production preview gate")
+    repo = Path(__file__).resolve().parent.parent
+    legacy = [Path(config.DB_PATH), repo / "deals_bot.db", repo / "deals_bot" / "deals_bot.db"]
+    with tempfile.TemporaryDirectory(prefix="deals-preview-") as directory:
+        if args.preview:
+            db = preview_database(Path(directory) / "deals_bot.db", config.DB_PATH)
         else:
-            msg_id = post_deal(deal)
-            if msg_id:
-                mark_as_posted(deal.url, deal.title, deal.source)
-                posted_count += 1
+            db = Database(config.DB_PATH)
+        store = GitStateStore(repo, db) if args.git_state else None
+        if store:
+            store.restore(legacy)
+        else:
+            db.initialize()
+            db.import_legacy(legacy)
+        save = (lambda: None) if args.preview or not store else store.save
+        save()  # Check durable writes before fetching or sending.
+        stats = run_deal_cycle(db, save, test_mode=args.preview)
+        if args.require_verified and stats["verified"] == 0:
+            print("Preview failed: no product passed live verification")
+            return 1
+        return 0
 
-                # Auto-pin the single hottest deal of the cycle (>=60% off)
-                if not top_deal_pinned and deal.discount_percent and deal.discount_percent >= 60:
-                    pin_deal_message(msg_id)
-                    top_deal_pinned = True
-
-                # Small delay between posts to avoid flooding
-                time.sleep(3)
-
-    if not test_mode:
-        total = get_total_posted()
-        print(f"\n✅ Posted {posted_count} deal(s) | Total ever posted: {total}")
-
-
-# ── Startup ───────────────────────────────────────────────────────────────────
-
-def startup() -> None:
-    print("\n" + "🛍️ " * 15)
-    print("   LOOT DEALS BOT - Starting Up")
-    print("🛍️ " * 15 + "\n")
-
-    # Validate config
-    if not validate_config():
-        print("\n❌ Please fix your .env file and restart.")
-        sys.exit(1)
-
-    # Test Telegram connection
-    if not test_connection():
-        print("\n❌ Cannot connect to Telegram. Check your BOT_TOKEN.")
-        sys.exit(1)
-
-    # Initialize database
-    init_db()
-
-    # Cleanup old DB records (keep 14 days of history)
-    cleanup_old_records(days=14)
-
-    print(f"\n⚙️  Settings:")
-    print(f"   Channel     : {config.CHANNEL_ID}")
-    print(f"   Interval    : Every {config.FETCH_INTERVAL_MINUTES} minute(s)")
-    print(f"   Min Discount: {config.MIN_DISCOUNT_PERCENT}%")
-    print(f"   Max Per Cycle: {config.MAX_DEALS_PER_CYCLE} deals")
-    print(f"   DB Path     : {config.DB_PATH}")
-    print(f"   Total Posted: {get_total_posted()} deals so far")
-
-
-# ── Main Entry ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-
-    # ── Test mode: preview deals without posting ──────────
-    if "--test" in args:
-        print("🧪 TEST MODE — No messages will be sent to Telegram\n")
-        validate_config()
-        init_db()
-        run_deal_cycle(test_mode=True)
-        sys.exit(0)
-
-    # ── One-shot mode: post now and exit ──────────────────
-    if "--now" in args:
-        startup()
-        run_deal_cycle(test_mode=False)
-        print("\n✅ One-shot run complete. Exiting.")
-        sys.exit(0)
-
-    # ── Normal mode: run forever on schedule ──────────────
-    startup()
-
-    # Run once immediately
-    print("\n🚀 Running first cycle now...")
-    run_deal_cycle()
-
-    # Schedule recurring runs
-    scheduler = BlockingScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(
-        func=run_deal_cycle,
-        trigger=IntervalTrigger(minutes=config.FETCH_INTERVAL_MINUTES),
-        id="deals_job",
-        name="Fetch & Post Deals",
-        replace_existing=True,
-    )
-
-    print(f"\n⏰ Scheduler started! Next run in {config.FETCH_INTERVAL_MINUTES} minute(s).")
-    print("   Press Ctrl+C to stop.\n")
-
     try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        print("\n\n👋 Bot stopped by user. Goodbye!")
+        sys.exit(main())
+    except Exception as error:
+        # Request exceptions may include bot tokens in URLs: log type only.
+        print(f"Bot stopped: {type(error).__name__}. Check state, source availability, and configuration.")
+        sys.exit(1)

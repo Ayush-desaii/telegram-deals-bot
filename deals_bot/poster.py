@@ -7,11 +7,33 @@ import requests
 from typing import Union, Optional
 from urllib.parse import quote
 from fetcher import Deal
-from formatter import format_deal_message, format_text_only_message
+from formatter import format_deal_message, format_text_only_message, fmt_price
 from watermark import add_watermark
 import config
 
 TELEGRAM_API = f"https://api.telegram.org/bot{config.BOT_TOKEN}"
+
+
+class AmbiguousDelivery(RuntimeError):
+    """Telegram may have accepted the send. Never retry/fallback automatically."""
+
+
+def message_result(resp):
+    if resp.status_code >= 500:
+        raise AmbiguousDelivery("Telegram server error")
+    try:
+        data = resp.json()
+        if data.get("ok") is True:
+            message_id = data["result"]["message_id"]
+            if not isinstance(message_id, int) or message_id <= 0:
+                raise ValueError("Invalid message id")
+            return message_id
+        if data.get("ok") is False and isinstance(data.get("error_code"), int):
+            print(f"Telegram explicitly rejected send: {data['error_code']}")
+            return None
+    except (ValueError, KeyError, TypeError, AttributeError) as error:
+        raise AmbiguousDelivery("Unreadable Telegram response") from error
+    raise AmbiguousDelivery("Unknown Telegram response")
 
 
 def build_deal_keyboard(deal: Deal) -> dict:
@@ -24,8 +46,9 @@ def build_deal_keyboard(deal: Deal) -> dict:
     handle = ch.lstrip("@") if ch and ch.startswith("@") else "ApexLootDealss"
     channel_link = f"https://t.me/{handle}"
 
-    disc_str = f"🔥 {deal.discount_percent}% OFF" if deal.discount_percent else "🔥 LOOT DEAL"
-    price_str = f"₹{int(deal.deal_price):,}" if deal.deal_price else ""
+    disc_str = (f"{deal.savings_percent:.1f}% below observed price" if deal.historical_price_paise is not None
+                else f"{deal.discount_percent}% off MRP")
+    price_str = fmt_price(deal.deal_price) if deal.deal_price else ""
     price_info = f" at {price_str}" if price_str else ""
     share_text = f"{disc_str}! {deal.title[:60]}...{price_info}\n\n👉 Join @{handle} for more daily loot deals!"
 
@@ -64,7 +87,7 @@ def send_photo_with_caption(
     Returns message_id on success, None on failure.
     """
     if len(caption) > 1024:
-        caption = caption[:1020] + "..."
+        raise ValueError("Caption exceeds Telegram limit")
 
     url = f"{TELEGRAM_API}/sendPhoto"
 
@@ -98,22 +121,15 @@ def send_photo_with_caption(
 
             resp = requests.post(url, json=payload, timeout=20)
 
-        data = resp.json()
-        if data.get("ok"):
-            return data["result"]["message_id"]
-
-        print(f"⚠️  sendPhoto failed: {data.get('description')}")
-        return None
-
-    except Exception as e:
-        print(f"❌ sendPhoto error: {e}")
-        return None
+        return message_result(resp)
+    except requests.RequestException as error:
+        raise AmbiguousDelivery("Photo delivery uncertain") from error
 
 
 def send_message(text: str, reply_markup: Optional[dict] = None) -> Optional[int]:
     """Send a text-only message with optional inline buttons. Returns message_id on success."""
     if len(text) > 4096:
-        text = text[:4090] + "..."
+        raise ValueError("Message exceeds Telegram limit")
 
     url = f"{TELEGRAM_API}/sendMessage"
     payload = {
@@ -127,14 +143,9 @@ def send_message(text: str, reply_markup: Optional[dict] = None) -> Optional[int
 
     try:
         resp = requests.post(url, json=payload, timeout=15)
-        data = resp.json()
-        if data.get("ok"):
-            return data["result"]["message_id"]
-        print(f"⚠️  sendMessage failed: {data.get('description')}")
-        return None
-    except Exception as e:
-        print(f"❌ sendMessage error: {e}")
-        return False
+        return message_result(resp)
+    except requests.RequestException as error:
+        raise AmbiguousDelivery("Text delivery uncertain") from error
 
 
 def pin_deal_message(message_id: int) -> bool:

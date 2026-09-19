@@ -1,127 +1,102 @@
-# 🛍️ Loot Deals Bot — Setup Guide
+# Verified Amazon India deals bot
 
-A fully automated Telegram bot that posts the best Indian loot deals to your channel every hour — and earns you **affiliate commission** on every purchase!
+Finds Amazon India products, verifies their current price and availability, and
+publishes qualifying offers with Amazon affiliate links to Telegram. GitHub
+Actions runs at 09:00, 13:30 and 20:30 IST, with at most two posts per run.
+GitHub scheduled runs can be delayed; these are requested times, not guarantees.
+The Instagram/Reel application and its Render deployment are separate.
 
----
+## Deal rules
 
-## 📁 Project Structure
+- Products need a real Amazon India URL/ASIN, positive price, matching product-page
+  identity and explicit in-stock text. Missing or blocked data means no post.
+- Prices are rechecked after discovery, with stale snapshots rejected after five
+  minutes. Verification failure never falls back to discovery prices.
+- New products need at least 40% off a valid MRP. Captions say **off MRP**, not
+  lowest-ever price or a verified historical discount.
+- After seven distinct prior days of verified observations, the comparison is the
+  median of daily minimum prices observed in the previous 30 UTC dates. The
+  current day is excluded. A deal then needs both a 10% drop and at least ₹50 saved.
+- Verified historical drops rank before MRP offers. This is sampled history from
+  this bot, not a complete market history. Observations are retained for 90 days.
+- Products are suppressed for seven days. A further 10% and ₹50 drop allows an
+  early repost after 24 hours. Legacy posts without prices keep seven-day suppression.
+- Coupons, delivery fees, seller comparisons and multi-store discovery are not
+  covered by this release. Source markup changes can reduce or stop discovery.
 
-```
-deals_bot/
-├── main.py          ← Entry point (run this)
-├── config.py        ← Loads settings from .env
-├── fetcher.py       ← Fetches deals from DesiDime & Amazon
-├── formatter.py     ← Formats deals into beautiful messages
-├── poster.py        ← Posts to your Telegram channel
-├── database.py      ← Tracks posted deals (no duplicates)
-├── .env             ← YOUR SECRET CONFIG (create from .env.example)
-├── requirements.txt ← Python dependencies
-└── deals_bot.db     ← Auto-created SQLite database
-```
+## Local setup and preview
 
----
+Use Python 3.12, install `pip install -r deals_bot/requirements.txt`, and copy
+`deals_bot/.env.example` to `deals_bot/.env`. Set `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_CHANNEL_ID`, and `AMAZON_AFFILIATE_TAG`. Give the bot channel posting rights.
 
-## ⚙️ Setup (One-Time)
+From the repository root:
 
-### Step 1 — Create your `.env` file
-```bash
-copy .env.example .env
-```
-Then open `.env` and fill in:
-
-| Variable | Where to get it |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | Message `@BotFather` → `/newbot` |
-| `TELEGRAM_CHANNEL_ID` | Your channel username e.g. `@MyDealsChannel` |
-| `AMAZON_AFFILIATE_TAG` | [Amazon Associates India](https://affiliate-program.amazon.in/) → your tag |
-| `FETCH_INTERVAL_MINUTES` | How often to post (e.g. `60` = every hour) |
-| `MIN_DISCOUNT_PERCENT` | Only post deals with this discount or more (e.g. `40`) |
-| `MAX_DEALS_PER_CYCLE` | Max deals per run (e.g. `3`) |
-
-### Step 2 — Add Bot as Admin to Your Channel
-1. Open your Telegram channel
-2. Go to **Administrators** → **Add Admin**
-3. Search your bot username and add it
-4. Enable **Post Messages** permission
-
-### Step 3 — Install Dependencies
-```bash
-pip install -r requirements.txt
+```sh
+python deals_bot/main.py --test
+python -m unittest discover -s deals_bot/tests -v
 ```
 
----
+Preview uses a temporary copy of the database, allows missing Telegram/affiliate
+credentials, and never sends messages or writes production state. To preview the
+current production state branch, add `--git-state`. Add `--require-verified` to
+fail the preview if no product can be verified, even if discovery returns data.
 
-## 🚀 Running the Bot
+`DB_PATH` may set an absolute path; otherwise the file lives beside the bot at
+`deals_bot/deals_bot.db`, independent of the working directory. The default CLI
+now runs once; GitHub Actions owns scheduling. `--now --git-state` is the explicit
+production command. Do not run it locally alongside the scheduled production job.
+Plain `--now` uses local SQLite state only and does not coordinate with GitHub.
 
-### Preview deals (no posting)
-```bash
-python main.py --test
-```
+## Durable state
 
-### Post once immediately and exit
-```bash
-python main.py --now
-```
+The `codex/deals-state` branch holds only `deals_bot.db`, separately from application
+code. It has the same visibility as the repository: product prices, post titles,
+ASINs, timestamps and Telegram message IDs are not private analytics. No tokens,
+customer data or credentials are stored there.
 
-### Run forever (auto-posts on schedule) ✅
-```bash
-python main.py
-```
+The first production run imports the latest restored legacy Actions cache and
+any checked-out legacy database, merging posting hashes by latest timestamp.
+No historical prices are invented. Later runs restore only the authoritative
+state branch. State corruption, inaccessible state or failed pushes stop posting.
 
----
+Every send has a durable `pending` attempt first. Successful sends save their
+Telegram message ID immediately. Network timeouts and unreadable responses remain
+pending because Telegram might already have accepted the message. Pending products
+are blocked indefinitely, including after restarts. Explicit rejections have a
+24-hour cooldown. A photo fallback is allowed only after a definite rejection.
 
-## 💰 Earning Money
+For a pending attempt, inspect the channel and reconcile the message manually
+before modifying its status. If it was delivered, record the message ID and mark
+it sent; if definitely undelivered, mark it rejected. Make a backup and pause the
+workflow before maintenance, then persist the corrected database to the state
+branch. Never clear pending records merely because a request timed out.
 
-### Amazon Associates
-1. Sign up at [affiliate-program.amazon.in](https://affiliate-program.amazon.in/)
-2. Get your affiliate tag (e.g. `yourname-21`)
-3. Add it to `.env` as `AMAZON_AFFILIATE_TAG`
-4. Bot auto-appends `?tag=yourname-21` to all Amazon links
-5. You earn **1–9% commission** on every purchase!
+GitHub's `deals-production` concurrency group serializes manual and scheduled
+runs. Non-force state pushes reject a stale competing writer. Repository write
+permission is limited to the production job; tests and preview are read-only.
 
-### Typical Earnings
-| Subscribers | Monthly Clicks | Avg Sales | Avg Earning |
-|---|---|---|---|
-| 1,000 | 500 | 25 | ₹1,000–₹5,000 |
-| 10,000 | 5,000 | 250 | ₹10,000–₹50,000 |
-| 1,00,000 | 50,000 | 2,500 | ₹1,00,000+ |
+## Release and rollout
 
----
+1. Run all tests on the implementation branch and review the diff. Never commit
+   `.env`, local credentials, virtual environments or working databases to `main`.
+2. Fast-forward and push `main`. The **Deals Tests** workflow validates the commit.
+3. In **Verified Amazon Deals**, use **Run workflow → main → preview**. Preview
+   uses live production sources and restores production history without saving it.
+4. Only after tests and the preview succeed, set repository Actions variable
+   `DEALS_APPROVED_SHA` to that exact full commit SHA. This enables scheduled posts
+   and the explicit manual `post` mode. Any later code commit requires a new preview
+   and approval SHA; a failed preview leaves posting gated.
+5. Check the next scheduled run's `CYCLE_RESULT` and the state branch. Zero eligible
+   offers is valid; zero verified products in the release preview requires investigation.
 
-## 🔄 Running 24/7 (Optional)
+Required GitHub secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`,
+`AMAZON_AFFILIATE_TAG`. Production refuses missing or placeholder affiliate tags.
+Tag attachment is tested; commission attribution must still be checked in the
+affiliate account and is not guaranteed by the code.
 
-To keep the bot running even when your PC is off:
-
-### Option A — Windows Task Scheduler
-1. Search "Task Scheduler" in Windows
-2. Create Basic Task → trigger: At startup
-3. Action: Start program → `python` with argument `e:\telegram\deals_bot\main.py`
-
-### Option B — Free Cloud Hosting
-- **PythonAnywhere** (free tier) — upload files, run `python main.py`
-- **Railway.app** — deploy with one click
-- **Google Cloud Run** — scalable, free tier available
-
----
-
-## 🛠️ Customization
-
-### Change deal sources
-Edit `config.py` → `RSS_FEEDS` list to add/remove feed URLs
-
-### Change message format
-Edit `formatter.py` → `format_deal_message()` function
-
-### Add more affiliate programs
-Edit `fetcher.py` → `make_affiliate_url()` function
-
----
-
-## ❓ Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `Bot token invalid` | Check `.env` — copy token from BotFather exactly |
-| `Chat not found` | Make sure bot is admin in channel |
-| `No deals found` | Lower `MIN_DISCOUNT_PERCENT` in `.env` |
-| `Duplicate deals` | Normal — DB tracks & skips them automatically |
+To pause posting, clear `DEALS_APPROVED_SHA`. For rollback, keep posting paused,
+revert the application commit, test and preview the resulting commit, then approve
+that SHA. Preserve the state branch and pending attempts. Code must understand the
+state schema before posting; the old cache-only release must not be restarted
+against stale state.

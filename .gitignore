@@ -1,8 +1,10 @@
 # Secret config — NEVER upload this
 deals_bot/.env
 
-# Database (managed by GitHub Actions cache)
+# Database (production snapshots live on codex/deals-state)
 deals_bot/deals_bot.db
+*.sqlite
+*.db-journal
 
 # Python cache
 __pycache__/

@@ -12,7 +12,9 @@ import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+from urllib.parse import urlparse, urlencode, parse_qs, urlunparse, urljoin
+from datetime import datetime, timezone
+from product import amazon_asin, paise, discount_percent as computed_discount
 
 import config
 
@@ -34,6 +36,13 @@ class Deal:
     rating_count: Optional[str] = None   # e.g. "12,345 ratings"
     deal_score: int = 0                  # computed quality score
     tags: list = field(default_factory=list)
+    asin: Optional[str] = None
+    availability: Optional[bool] = None
+    verified_at: Optional[str] = None
+    historical_price_paise: Optional[int] = None
+    historical_days: int = 0
+    savings_percent: float = 0
+    savings_paise: int = 0
 
 
 # ── HTTP Session ───────────────────────────────────────────────────────────────
@@ -51,7 +60,7 @@ def make_session() -> requests.Session:
         "User-Agent": random.choice(USER_AGENTS),
         "Accept-Language": "en-IN,en;q=0.9",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "DNT": "1",
@@ -78,6 +87,10 @@ def safe_get(url: str, timeout: int = 15) -> Optional[requests.Response]:
 # ── Affiliate Tag ──────────────────────────────────────────────────────────────
 
 def add_affiliate_tag(url: str) -> str:
+    asin = amazon_asin(url)
+    if not asin:
+        raise ValueError("Expected an Amazon India product URL")
+    url = f"https://www.amazon.in/dp/{asin}"
     tag = config.AMAZON_AFFILIATE_TAG
     if not tag or tag == "yourtag-21":
         return url
@@ -95,8 +108,7 @@ def add_affiliate_tag(url: str) -> str:
         return f"{url}{sep}tag={tag}"
 
 def extract_asin(url: str) -> Optional[str]:
-    m = re.search(r"/(?:dp|gp/product|product)/([A-Z0-9]{10})", url)
-    return m.group(1) if m else None
+    return amazon_asin(url)
 
 def make_affiliate_url(asin_or_url: str) -> str:
     """
@@ -108,7 +120,7 @@ def make_affiliate_url(asin_or_url: str) -> str:
     if re.match(r"^[A-Z0-9]{10}$", url):
         return add_affiliate_tag(f"https://www.amazon.in/dp/{url}")
 
-    if "amazon.in" in url or "amzn.to" in url or "amzn.in" in url:
+    if amazon_asin(url):
         return add_affiliate_tag(url)
 
     # Multi-store EarnKaro routing (Flipkart, Myntra, Ajio, Nykaa)
@@ -120,7 +132,7 @@ def make_affiliate_url(asin_or_url: str) -> str:
     return url
 
 def resolve_short_url(url: str) -> str:
-    if "amzn.to" in url or ("amzn.in" in url and "/dp/" not in url):
+    if urlparse(url).hostname in ("amzn.to", "amzn.in"):
         try:
             r = requests.get(url, headers={"User-Agent": USER_AGENTS[0]},
                              timeout=8, allow_redirects=True)
@@ -136,9 +148,9 @@ def parse_price(text: str) -> Optional[float]:
     if not text:
         return None
     text = re.sub(r"[₹,\s]", "", text.replace("Rs.", "").replace("INR", ""))
-    m = re.search(r"\d+(?:\.\d+)?", text)
+    m = re.fullmatch(r"\d+(?:\.\d{1,2})?", text)
     try:
-        return float(m.group()) if m else None
+        return float(m.group()) if m and paise(m.group()) else None
     except Exception:
         return None
 
@@ -156,9 +168,7 @@ def parse_rating(text: str) -> Optional[str]:
     return None
 
 def calc_discount(original: Optional[float], deal: Optional[float]) -> Optional[int]:
-    if original and deal and original > deal > 0:
-        return int(((original - deal) / original) * 100)
-    return None
+    return computed_discount(original, deal)
 
 def clean_html(html: str) -> str:
     return BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
@@ -210,13 +220,31 @@ def scrape_product_page(url: str) -> Optional[dict]:
     """
     url = resolve_short_url(url)
     asin = extract_asin(url)
-    clean_url = f"https://www.amazon.in/dp/{asin}" if asin else url
+    if not asin:
+        return None
+    clean_url = f"https://www.amazon.in/dp/{asin}"
 
     resp = safe_get(clean_url)
     if not resp:
         return None
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    if amazon_asin(resp.url) != asin or soup.select_one("#captchacharacters, form[action*='validateCaptcha']"):
+        return None
+    page_asin = soup.select_one("input#ASIN")
+    canonical = soup.select_one("link[rel='canonical']")
+    identities = []
+    if page_asin:
+        identities.append(page_asin.get("value", ""))
+    if canonical:
+        identities.append(amazon_asin(canonical.get("href", "")))
+    if not identities or any(identity != asin for identity in identities):
+        return None
+    availability_el = soup.select_one("#availability")
+    availability_text = availability_el.get_text(" ", strip=True).lower() if availability_el else ""
+    unavailable = any(word in availability_text for word in
+                      ("unavailable", "out of stock", "not in stock", "temporarily"))
+    availability = (not unavailable and bool(re.search(r"\bin stock\b|only \d+ left in stock", availability_text))) if availability_text else None
 
     # ── Title ──────────────────────────────────────────────
     title = None
@@ -244,11 +272,12 @@ def scrape_product_page(url: str) -> Optional[dict]:
     # ── Deal Price ─────────────────────────────────────────
     deal_price = None
     for sel in [
-        "span.priceToPay .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div span.priceToPay .a-offscreen",
+        "#corePrice_feature_div span.priceToPay .a-offscreen",
         "#priceblock_dealprice",
         "#priceblock_ourprice",
-        "span.a-price:not(.a-text-price) .a-offscreen",
-        ".a-price .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div span.a-price:not(.a-text-price) .a-offscreen",
+        "#corePrice_feature_div span.a-price:not(.a-text-price) .a-offscreen",
     ]:
         el = soup.select_one(sel)
         if el:
@@ -260,9 +289,9 @@ def scrape_product_page(url: str) -> Optional[dict]:
     # ── MRP / Original Price ───────────────────────────────
     original_price = None
     for sel in [
-        "span.a-price.a-text-price .a-offscreen",
-        ".basisPrice .a-offscreen",
-        "span.a-text-price .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div .basisPrice .a-offscreen",
+        "#corePriceDisplay_desktop_feature_div span.a-text-price .a-offscreen",
+        "#corePrice_feature_div span.a-text-price .a-offscreen",
         "#listPrice",
     ]:
         el = soup.select_one(sel)
@@ -322,6 +351,8 @@ def scrape_product_page(url: str) -> Optional[dict]:
         "category": category,
         "asin": asin,
         "clean_url": clean_url,
+        "availability": availability,
+        "verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
@@ -496,7 +527,7 @@ def fetch_amazon_bestsellers_enriched(page_url: str, category: str,
         if not asin:
             a_el = card.select_one("a[href*='/dp/']")
             if a_el:
-                asin = extract_asin(a_el.get("href", ""))
+                asin = extract_asin(urljoin(page_url, a_el.get("href", "")))
         if asin and asin not in asin_list:
             asin_list.append(asin)
 
@@ -547,10 +578,13 @@ def fetch_reddit_amazon_deals() -> list[Deal]:
     deals = []
     for feed_url, feed_name in RSS_FEEDS_LIST:
         try:
-            feed = feedparser.parse(feed_url, request_headers=REDDIT_HEADERS)
+            response = safe_get(feed_url)
+            if response is None:
+                continue
+            feed = feedparser.parse(response.content)
             print(f"   📡 {feed_name}: {len(feed.entries)} posts")
 
-            for entry in feed.entries:
+            for entry in feed.entries[:10]:
                 title = entry.get("title", "").strip()
                 if any(w in title.lower() for w in
                        ["weekly", "megathread", "discussion", "help", "question", "where to"]):
@@ -558,7 +592,8 @@ def fetch_reddit_amazon_deals() -> list[Deal]:
 
                 full_text = entry.get("summary", "") + \
                             (entry.get("content") or [{}])[0].get("value", "")
-                links = AMAZON_LINK_RE.findall(full_text)
+                links = [a.get("href", "") for a in BeautifulSoup(full_text, "html.parser").select("a[href]")
+                         if amazon_asin(a.get("href", "")) or urlparse(a.get("href", "")).hostname in ("amzn.to", "amzn.in")]
                 if not links:
                     continue
 
@@ -715,30 +750,38 @@ def fetch_all_deals() -> list[Deal]:
     return unique
 
 
-SUPPORTED_STORES = [
-    "amazon.in", "amzn.to", "amzn.in",
-    "flipkart.com", "dl.flipkart.com",
-    "myntra.com", "ajio.com", "earnkaro.com"
-]
-
 def filter_deals(deals: list[Deal]) -> list[Deal]:
-    """
-    Keep valid deals from Amazon, Flipkart, Myntra, Ajio.
-    For deals WITH discount data: apply minimum discount filter.
-    For deals WITHOUT discount data (bestsellers): require price < ₹2000.
-    """
+    """Validate discovery data; eligibility is decided after fresh verification."""
     filtered = []
     for deal in deals:
-        if not deal.title or not deal.url:
+        asin = amazon_asin(deal.url)
+        if not deal.title or not deal.title.strip() or not asin or not paise(deal.deal_price):
             continue
-        if not any(store in deal.url.lower() for store in SUPPORTED_STORES):
-            continue
-        if deal.discount_percent is not None:
-            if deal.discount_percent < config.MIN_DISCOUNT_PERCENT:
-                continue
-        else:
-            # No discount data — only include if price is low (impulse buy)
-            if deal.deal_price and deal.deal_price > 2000:
-                continue
+        deal.asin = asin
+        deal.discount_percent = calc_discount(deal.original_price, deal.deal_price)
         filtered.append(deal)
     return filtered
+
+
+def verify_deal(deal: Deal) -> Optional[Deal]:
+    """Return a new snapshot: never retain stale price/image/rating fields."""
+    asin = amazon_asin(deal.url)
+    if not asin:
+        return None
+    details = scrape_product_page(f"https://www.amazon.in/dp/{asin}")
+    if (not details or details.get("asin") != asin or details.get("availability") is not True
+            or not paise(details.get("deal_price")) or not details.get("title", "").strip()):
+        reason = ("page or identity not verified" if not details else
+                  "availability not confirmed" if details.get("availability") is not True else
+                  "missing valid product data")
+        print(f"   Skipped {asin}: {reason}")
+        return None
+    fresh = Deal(
+        title=details["title"], url=make_affiliate_url(asin), source=deal.source,
+        asin=asin, availability=True, verified_at=details["verified_at"],
+        **{key: details.get(key) for key in ("deal_price", "original_price", "image_url",
+                                           "rating", "rating_count", "category")},
+    )
+    fresh.discount_percent = calc_discount(fresh.original_price, fresh.deal_price)
+    fresh.deal_score = score_deal(fresh)
+    return fresh

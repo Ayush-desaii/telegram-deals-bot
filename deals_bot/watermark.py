@@ -75,14 +75,11 @@ def add_watermark(image_url: str, deal) -> Optional[io.BytesIO]:
         disc = getattr(deal, "discount_percent", None)
         price = getattr(deal, "deal_price", None)
 
-        if price and price <= 99:
-            badge_text = " UNDER ₹99 LOOT "
-            badge_bg = (124, 58, 237, 245)    # Purple Royal Loot
-        elif price and price <= 199:
-            badge_text = " UNDER ₹199 LOOT "
-            badge_bg = (217, 119, 6, 245)     # Amber / Gold Loot
+        if getattr(deal, "historical_price_paise", None) is not None:
+            badge_text = f" {deal.savings_percent:.1f}% PRICE DROP "
+            badge_bg = (229, 9, 20, 245)
         elif disc and disc >= 10:
-            badge_text = f" {disc}% OFF "
+            badge_text = f" {disc}% OFF MRP "
             badge_bg = (229, 9, 20, 245)      # Vibrant Red
         else:
             badge_text = " LOOT DEAL "

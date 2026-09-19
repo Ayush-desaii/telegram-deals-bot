@@ -1,66 +1,101 @@
-name: 🛍️ Smart Scheduled Amazon Deals Bot
+name: Verified Amazon Deals
 
 on:
-  # ── 3 Peak Indian Mobile-Usage Slots Daily ───────────────
   schedule:
-    - cron: '30 3 * * *'   # 09:00 AM IST (Morning Commute)
-    - cron: '0 8 * * *'    # 01:30 PM IST (Lunch Break)
-    - cron: '0 15 * * *'   # 08:30 PM IST (Prime Evening Shopping)
-
-  # ── Manual trigger from GitHub Actions UI ─────────────────
+    - cron: '30 3 * * *' # 09:00 IST
+    - cron: '0 8 * * *'  # 13:30 IST
+    - cron: '0 15 * * *' # 20:30 IST
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Preview never posts or saves production state
+        type: choice
+        options: [preview, post]
+        default: preview
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deals-production
+  cancel-in-progress: false
 
 jobs:
-  post-deals:
-    name: Fetch & Post Amazon Deals
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: deals_bot/requirements.txt
+      - run: pip install -r deals_bot/requirements.txt
+      - run: python -m unittest discover -s deals_bot/tests -v
+
+  preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'preview'
+    needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
-      - name: 📥 Checkout Code
-        uses: actions/checkout@v4
-
-      - name: 🐍 Setup Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: '3.12'
+          cache: pip
           cache-dependency-path: deals_bot/requirements.txt
-
-      - name: 📦 Install Dependencies
-        run: pip install -r deals_bot/requirements.txt
-
-      - name: 🔐 Create .env from GitHub Secrets
-        run: |
-          cat > deals_bot/.env << 'EOF'
-          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHANNEL_ID=${{ secrets.TELEGRAM_CHANNEL_ID }}
-          AMAZON_AFFILIATE_TAG=${{ secrets.AMAZON_AFFILIATE_TAG }}
-          EARNKARO_USER_ID=${{ secrets.EARNKARO_USER_ID }}
-          FETCH_INTERVAL_MINUTES=360
-          MIN_DISCOUNT_PERCENT=40
-          MAX_DEALS_PER_CYCLE=2
-          EOF
-
-      # Restore DB — prevents duplicate posts across runs
-      - name: 🗄️ Restore Deals Database
-        uses: actions/cache@v4
+      - run: pip install -r deals_bot/requirements.txt
+      - name: Restore legacy cache for bootstrap only
+        uses: actions/cache/restore@v4
         with:
           path: deals_bot/deals_bot.db
-          key: deals-db-${{ github.run_number }}
-          restore-keys: |
-            deals-db-
-
-      - name: 🚀 Run Deals Bot
-        run: |
-          cd deals_bot
-          python -X utf8 main.py --now
+          key: deals-db-preview-${{ github.run_id }}
+          restore-keys: deals-db-
+      - name: Verify production sources without posting
+        run: python -u deals_bot/main.py --test --git-state --require-verified
         env:
-          PYTHONIOENCODING: utf-8
+          AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
+          MIN_DISCOUNT_PERCENT: '40'
+          MAX_DEALS_PER_CYCLE: '2'
+      - name: Validate production settings without contacting Telegram
+        working-directory: deals_bot
+        run: python -c "import config; raise SystemExit(0 if config.validate_config() else 1)"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
 
-      - name: 💾 Save Database Cache
-        uses: actions/cache/save@v4
-        if: always()
+  post:
+    if: >-
+      github.ref == 'refs/heads/main' && vars.DEALS_APPROVED_SHA == github.sha &&
+      (github.event_name == 'schedule' || inputs.mode == 'post')
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: deals_bot/requirements.txt
+      - run: pip install -r deals_bot/requirements.txt
+      - name: Restore legacy cache for bootstrap only
+        uses: actions/cache/restore@v4
         with:
           path: deals_bot/deals_bot.db
-          key: deals-db-${{ github.run_number }}
+          key: deals-db-bootstrap-${{ github.run_id }}
+          restore-keys: deals-db-
+      - name: Fetch, verify, and post with durable state
+        run: python -u deals_bot/main.py --now --git-state
+        env:
+          DB_PATH: ${{ runner.temp }}/deals-state.sqlite
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
+          DEALS_APPROVED_SHA: ${{ vars.DEALS_APPROVED_SHA }}
+          MIN_DISCOUNT_PERCENT: '40'
+          MAX_DEALS_PER_CYCLE: '2'

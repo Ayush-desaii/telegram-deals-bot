@@ -1,255 +1,37 @@
-"""
-formatter.py - Enhanced deal message with discount as the hero element
-"""
+"""Evidence-based, bounded Telegram HTML assembled from escaped values."""
+from html import escape
+from decimal import Decimal
 from fetcher import Deal
 
 
-# ── Category Emoji Map ─────────────────────────────────────────────────────────
+def fmt_price(price):
+    return f"₹{Decimal(str(price)):,.2f}"
 
-CATEGORY_EMOJI = {
-    "electronics": "📱", "mobile": "📱", "smartphone": "📱", "phone": "📱",
-    "laptop": "💻", "computer": "💻", "notebook": "💻",
-    "camera": "📷", "dslr": "📷",
-    "television": "📺", "tv": "📺", "monitor": "🖥️",
-    "headphone": "🎧", "earphone": "🎧", "earbud": "🎧",
-    "speaker": "🔊", "bluetooth": "🔊",
-    "fashion": "👗", "clothing": "👕", "shirt": "👕", "dress": "👗",
-    "shoes": "👟", "sneaker": "👟", "sandal": "👡",
-    "watch": "⌚", "smartwatch": "⌚",
-    "kitchen": "🍳", "cookware": "🍳", "pressure": "🍳",
-    "home": "🏠", "furniture": "🪑",
-    "appliance": "🔌", "refrigerator": "❄️", "washing": "🫧", "ac": "❄️",
-    "beauty": "💄", "skincare": "🧴", "makeup": "💄",
-    "health": "💊", "fitness": "💪", "gym": "💪",
-    "sports": "⚽", "cricket": "🏏", "cycling": "🚴",
-    "toys": "🧸", "kids": "🧒",
-    "books": "📚", "stationery": "✏️",
-    "gaming": "🎮", "xbox": "🎮", "playstation": "🎮",
-    "tablet": "📟", "ipad": "📟",
-    "charger": "🔋", "powerbank": "🔋", "cable": "🔌",
-    "bag": "👜", "backpack": "🎒", "luggage": "🧳",
-    "microwave": "📡", "oven": "🍕",
-}
-
-DEFAULT_EMOJI = "🔥"
-FIRE_THRESHOLDS = {70: "🔥🔥🔥", 50: "🔥🔥", 30: "🔥"}
-
-
-def get_emoji(deal: Deal) -> str:
-    text = f"{deal.title or ''} {deal.category or ''}".lower()
-    for kw, em in CATEGORY_EMOJI.items():
-        if kw in text:
-            return em
-    return DEFAULT_EMOJI
-
-
-def get_fire_badge(discount: int) -> str:
-    for threshold, badge in FIRE_THRESHOLDS.items():
-        if discount >= threshold:
-            return badge
-    return "🔥"
-
-
-def fmt_price(price: float) -> str:
-    return f"₹{int(price):,}"
-
-def fmt_rating(rating_str: str) -> str:
-    try:
-        r = float(rating_str)
-        full = int(r)
-        half = 1 if (r - full) >= 0.5 else 0
-        stars = "★" * full + ("½" if half else "") + "☆" * (5 - full - half)
-        return f"{stars} {rating_str}/5"
-    except Exception:
-        return f"⭐ {rating_str}/5"
-
-
-# ── Photo Caption (≤1024 chars) ────────────────────────────────────────────────
 
 def format_deal_message(deal: Deal) -> str:
-    """
-    Caption for photo messages — discount is the HERO at the top.
-    """
-    emoji = get_emoji(deal)
-    lines = []
-
-    # ── Discount / Price Badge (most prominent) ───────────
-    if deal.deal_price and deal.deal_price <= 99:
-        lines.append("⚡ <b>UNDER ₹99 MEGA LOOT!</b> ⚡")
-    elif deal.deal_price and deal.deal_price <= 199:
-        lines.append("⚡ <b>UNDER ₹199 BUDGET DEAL!</b> ⚡")
-    elif deal.discount_percent and deal.discount_percent >= 10:
-        fire = get_fire_badge(deal.discount_percent)
-        lines.append(f"<b>━━━  {deal.discount_percent}% OFF  ━━━</b> {fire}")
+    if deal.historical_price_paise is not None:
+        heading = f"{deal.savings_percent:.1f}% below observed price"
+        comparison = (f"Observed comparison: {fmt_price(Decimal(deal.historical_price_paise) / 100)}"
+                      f" ({deal.historical_days} days sampled in the prior 30 days)")
     else:
-        lines.append(f"{emoji} <b>DEAL ALERT</b> {emoji}")
-    lines.append("")
-
-    # ── Title ─────────────────────────────────────────────
-    title = (deal.title or "Amazon Deal")[:100]
-    lines.append(f"<b>{title}</b>")
-    lines.append("")
-
-    # ── Price Block ───────────────────────────────────────
-    if deal.deal_price and deal.original_price and deal.original_price > deal.deal_price:
-        lines.append(f"💰 <b>{fmt_price(deal.deal_price)}</b>  "
-                     f"<s>{fmt_price(deal.original_price)}</s>")
-        saved = deal.original_price - deal.deal_price
-        lines.append(f"💸 You save <b>{fmt_price(saved)}</b>")
-    elif deal.deal_price:
-        lines.append(f"💰 <b>{fmt_price(deal.deal_price)}</b>")
-        if not deal.discount_percent:
-            lines.append("🏆 <b>Amazon Best Seller</b>")
-
-    lines.append("")
-
-    # ── Rating ────────────────────────────────────────────
+        heading = f"{deal.discount_percent}% off MRP"
+        comparison = f"MRP: {fmt_price(deal.original_price)}"
+    # Bound each external field before escaping; never cut serialized HTML.
+    title = escape(deal.title[:60])
+    lines = [f"<b>{heading}</b>", "", f"<b>{title}</b>",
+             f"Price: <b>{fmt_price(deal.deal_price)}</b>", comparison,
+             f"Save {fmt_price(Decimal(deal.savings_paise) / 100)}"]
     if deal.rating:
-        try:
-            r_text = fmt_rating(deal.rating)
-            if deal.rating_count:
-                lines.append(f"{r_text}  ({deal.rating_count})")
-            else:
-                lines.append(r_text)
-            lines.append("")
-        except Exception:
-            pass
+        lines.append(f"Rating: {escape(str(deal.rating)[:5])}/5")
+    lines.extend(["", f'<a href="{escape(deal.url, quote=True)}">Buy on Amazon →</a>',
+                  f"Checked: {escape(str(deal.verified_at)[:19])} UTC",
+                  "Price and availability may change.",
+                  "Affiliate link: we may earn from qualifying purchases.", "#AmazonIndia #Deals"])
+    result = "\n".join(lines)
+    if len(result.encode("utf-16-le")) // 2 > 1024:
+        raise ValueError("Caption exceeds Telegram limit")
+    return result
 
-    # ── CTA ───────────────────────────────────────────────
-    url_lower = deal.url.lower()
-    store_cta = "FLIPKART" if "flipkart" in url_lower else ("MYNTRA" if "myntra" in url_lower else ("AJIO" if "ajio" in url_lower else "AMAZON"))
-    lines.append(f'🛒 <a href="{deal.url}"><b>BUY NOW ON {store_cta} →</b></a>')
-    lines.append("")
-
-    # ── Hashtags ──────────────────────────────────────────
-    lines.append(build_hashtags(deal))
-
-    msg = "\n".join(lines)
-    # Truncate to Telegram caption limit
-    return msg[:1024] if len(msg) > 1024 else msg
-
-
-# ── Text-Only Message (≤4096 chars) ───────────────────────────────────────────
 
 def format_text_only_message(deal: Deal) -> str:
-    """
-    Full text message when no image is available.
-    More detail since there's no photo.
-    """
-    emoji = get_emoji(deal)
-    lines = []
-
-    # ── Big Discount Banner ────────────────────────────────
-    if deal.discount_percent and deal.discount_percent >= 10:
-        fire = get_fire_badge(deal.discount_percent)
-        lines.append(f"{'▬' * 20}")
-        lines.append(f"  <b>{deal.discount_percent}% OFF</b>  {fire}")
-        lines.append(f"{'▬' * 20}")
-    else:
-        lines.append(f"{'─' * 25}")
-        lines.append(f"{emoji} <b>DEAL ALERT</b> {emoji}")
-        lines.append(f"{'─' * 25}")
-    lines.append("")
-
-    # ── Title ─────────────────────────────────────────────
-    title = (deal.title or "Amazon Deal")[:150]
-    lines.append(f"📦 <b>{title}</b>")
-    lines.append("")
-
-    # ── Full Price Block ──────────────────────────────────
-    if deal.deal_price:
-        lines.append(f"💰 <b>Price: {fmt_price(deal.deal_price)}</b>")
-    if deal.original_price and deal.original_price != deal.deal_price:
-        lines.append(f"🏷️ MRP: <s>{fmt_price(deal.original_price)}</s>")
-    if deal.discount_percent:
-        lines.append(f"📉 <b>Discount: {deal.discount_percent}% OFF</b>")
-    if deal.deal_price and deal.original_price and deal.original_price > deal.deal_price:
-        saved = deal.original_price - deal.deal_price
-        lines.append(f"💸 <b>You Save: {fmt_price(saved)}</b>")
-    if not deal.discount_percent and not deal.original_price:
-        lines.append("🏆 <b>Amazon Best Seller</b>")
-
-    lines.append("")
-
-    # ── Rating ────────────────────────────────────────────
-    if deal.rating:
-        try:
-            r_text = fmt_rating(deal.rating)
-            if deal.rating_count:
-                lines.append(f"⭐ {r_text}  |  {deal.rating_count}")
-            else:
-                lines.append(f"⭐ {r_text}")
-            lines.append("")
-        except Exception:
-            pass
-
-    # ── Category ──────────────────────────────────────────
-    if deal.category:
-        lines.append(f"📂 {deal.category}")
-        lines.append("")
-
-    # ── CTA ───────────────────────────────────────────────
-    lines.append(f'🛒 <a href="{deal.url}"><b>BUY NOW ON AMAZON →</b></a>')
-    lines.append("")
-    lines.append(build_hashtags(deal))
-
-    return "\n".join(lines)
-
-
-# ── Hashtag Builder ────────────────────────────────────────────────────────────
-
-def build_hashtags(deal: Deal) -> str:
-    tags = ["#LootDeal"]
-    url_lower = deal.url.lower()
-    if "flipkart" in url_lower:
-        tags.append("#FlipkartDeals")
-    elif "myntra" in url_lower:
-        tags.append("#MyntraSale")
-    elif "ajio" in url_lower:
-        tags.append("#AjioSale")
-    else:
-        tags.append("#AmazonIndia")
-
-    disc = deal.discount_percent or 0
-    if disc >= 70:
-        tags.append("#SuperLoot")
-    elif disc >= 50:
-        tags.append("#BigOff")
-    elif disc >= 30:
-        tags.append("#GoodDeal")
-
-    if deal.deal_price and deal.deal_price <= 99:
-        tags.append("#Under99")
-    elif deal.deal_price and deal.deal_price <= 199:
-        tags.append("#Under199")
-
-    text = f"{deal.title or ''} {deal.category or ''}".lower()
-
-    brand_tags = {
-        "samsung": "#Samsung", "apple": "#Apple", "oneplus": "#OnePlus",
-        "redmi": "#Redmi", "realme": "#Realme", "poco": "#POCO",
-        "boat": "#boAt", "jbl": "#JBL", "sony": "#Sony", "lg": "#LG",
-        "philips": "#Philips", "prestige": "#Prestige", "nike": "#Nike",
-        "adidas": "#Adidas",
-    }
-    for brand, tag in brand_tags.items():
-        if brand in text:
-            tags.append(tag)
-            break
-
-    cat_tags = {
-        ("phone", "mobile", "smartphone"): "#Smartphones",
-        ("laptop", "notebook"): "#Laptops",
-        ("headphone", "earphone", "earbud", "boat", "jbl"): "#AudioDeals",
-        ("tv", "television"): "#TVDeals",
-        ("shoe", "sneaker", "sandal"): "#Footwear",
-        ("kitchen", "cookware", "appliance"): "#HomeAppliances",
-        ("watch", "smartwatch"): "#Watches",
-        ("gaming", "playstation", "xbox"): "#Gaming",
-    }
-    for keywords, tag in cat_tags.items():
-        if any(kw in text for kw in keywords):
-            tags.append(tag)
-            break
-
-    return " ".join(tags[:5])
+    return format_deal_message(deal)
