@@ -21,6 +21,9 @@ from quality import selection_reason, ranking
 from reporting import CycleReport
 from state_store import GitStateStore, preview_database
 from watchlist import Watchlist, load_manual
+from earnkaro import EarnKaroLinks, purchase_url
+from product import product_identity
+import flipkart
 
 
 class SourceUnavailable(RuntimeError):
@@ -28,12 +31,15 @@ class SourceUnavailable(RuntimeError):
 
 
 def run_deal_cycle(db, save_state, test_mode=False, report_dir=None, manual_asins=(),
-                   budget=None, report=None, force_preview_checks=False):
+                   budget=None, report=None, force_preview_checks=False,
+                   affiliate_links=None, include_flipkart=None):
     report = report or CycleReport(test_mode)
     watch = Watchlist(db)
     client = HttpClient(budget or Budget())
     state_writable = True
     error = None
+    affiliate_links = affiliate_links or EarnKaroLinks()
+    include_flipkart = config.FLIPKART_ENABLED if include_flipkart is None else include_flipkart
 
     def persist():
         nonlocal state_writable
@@ -57,8 +63,24 @@ def run_deal_cycle(db, save_state, test_mode=False, report_dir=None, manual_asin
         item["eligible"] = reason == "eligible"
         if reason == "eligible":
             reason = db.posting_reason(deal)
+        if reason == "eligible" and product_identity(deal.canonical_url or deal.url)[0] == "flipkart":
+            reason = "eligible" if item.get("affiliate") == "ready" else item.get("affiliate", "affiliate_missing")
+            if reason == "eligible":
+                try:
+                    purchase_url(deal)
+                except ValueError:
+                    reason = "affiliate_stale"
         item["selection"] = reason
         return reason == "eligible"
+
+    def record(candidate, result, item, phase_client):
+        watch.record(candidate.asin, result)
+        if result.deal is not None:
+            db.observe(result.deal)
+            if product_identity(candidate.url)[0] == "flipkart":
+                item["affiliate"] = affiliate_links.prepare(result.deal, phase_client)
+            return assess(result.deal, item)
+        return False
 
     try:
         watch.sync_manual(manual_asins)
@@ -70,13 +92,26 @@ def run_deal_cycle(db, save_state, test_mode=False, report_dir=None, manual_asin
         # time for watched products, and the last two minutes for final refreshes.
         discovery_budget = Budget(min(300, client.budget.remaining()),
                                   clock=client.budget.clock, sleeper=client.budget.sleeper)
-        results = discover(HttpClient(discovery_budget, client.session))
+        discovery_client = HttpClient(discovery_budget, client.session)
+        results = discover(discovery_client)
+        if include_flipkart:
+            results.extend(flipkart.discover(discovery_client, affiliate_links))
+        else:
+            issues = {"store_disabled": 1}
+            if not affiliate_links.links:
+                issues["affiliate_unconfigured"] = 1
+            results.append(SourceResult("earnkaro:registered", "disabled", issues=issues))
         discoveries = []
         for source in results:
             report.add_source(source)
             discoveries.extend(source.candidates)
         report.add_source(SourceResult("watchlist", "successful" if due else "empty"))
-        selected, merged, deferred = select_candidates(due, discoveries, tracked)
+        active_due = [row for row in due if include_flipkart or product_identity(row["url"])[0] == "amazon"]
+        selected, merged, deferred = select_candidates(active_due, discoveries, tracked)
+        for row in due:
+            if row not in active_due:
+                merged[row["asin"]] = ProductCandidate(row["asin"], row["url"], source_ids={"watchlist"})
+                deferred[row["asin"]] = "store_disabled"
         found = {candidate.asin for candidate in discoveries}
         watched = {row["asin"] for row in due}
         for asin, candidate in merged.items():
@@ -84,7 +119,8 @@ def run_deal_cycle(db, save_state, test_mode=False, report_dir=None, manual_asin
             item["selection"] = deferred.get(asin)
             # An optional search price is an unverified observation, never a posting input.
             if candidate.metadata.get("deal_price") is not None:
-                db.observe(Deal(candidate.metadata.get("title", ""), candidate.url, "Amazon India",
+                db.observe(Deal(candidate.metadata.get("title", ""), candidate.url,
+                                "Flipkart" if product_identity(candidate.url)[0] == "flipkart" else "Amazon India",
                                 deal_price=candidate.metadata["deal_price"]))
         persist()
 
@@ -96,11 +132,8 @@ def run_deal_cycle(db, save_state, test_mode=False, report_dir=None, manual_asin
             item = report.products[candidate.asin]
             result = check(candidate, initial_client)
             item["initial"] = result.reason
-            watch.record(candidate.asin, result)
-            if result.deal is not None:
-                db.observe(result.deal)
-                if assess(result.deal, item):
-                    qualified.append((result.deal, candidate))
+            if record(candidate, result, item, initial_client):
+                qualified.append((result.deal, candidate))
         persist()
 
         attempted = [item["initial"] for item in report.products.values()
@@ -119,12 +152,10 @@ def run_deal_cycle(db, save_state, test_mode=False, report_dir=None, manual_asin
                 continue
             result = check(candidate, client)
             item["refresh"] = result.reason
-            watch.record(candidate.asin, result)
-            if result.deal is not None:
-                db.observe(result.deal)
-                if assess(result.deal, item):
-                    ready.append(result.deal)
-            else:
+            item["affiliate"] = None
+            if record(candidate, result, item, client):
+                ready.append(result.deal)
+            elif result.deal is None:
                 item["eligible"] = False
                 item["selection"] = result.reason
         persist()
@@ -190,13 +221,19 @@ def main():
     parser.add_argument("--git-state", action="store_true")
     parser.add_argument("--require-verified", action="store_true")
     parser.add_argument("--report-dir", help="Write report.json and report.md here")
+    parser.add_argument("--require-store", choices=["flipkart"],
+                        help="Preview only: require a live verified Flipkart product and working EarnKaro link")
     args = parser.parse_args()
     report = CycleReport(args.preview)
     cycle_started = False
     try:
         if not config.validate_config(production=not args.preview):
             raise ValueError("Invalid production configuration")
-        manual = load_manual(config.BASE_DIR / "watchlist.txt")
+        if args.require_store and not args.preview:
+            raise ValueError("--require-store is only allowed in preview")
+        product_urls = {}
+        manual = load_manual(config.BASE_DIR / "watchlist.txt", product_urls)
+        links = EarnKaroLinks.load(config.EARNKARO_LINKS_FILE, config.EARNKARO_LINKS_JSON)
         if os.getenv("GITHUB_ACTIONS") == "true" and not args.preview:
             if not args.git_state:
                 raise RuntimeError("GitHub production requires durable Git state")
@@ -214,11 +251,24 @@ def main():
             else:
                 db.initialize()
                 db.import_legacy(legacy)
+            for url in product_urls.values():
+                db.register_product(url)
             save = (lambda: None) if args.preview or not store else store.save
             cycle_started = True
+            store_approved = (args.preview or os.getenv("GITHUB_ACTIONS") != "true"
+                              or (bool(os.getenv("GITHUB_SHA")) and
+                                  os.getenv("FLIPKART_APPROVED_SHA") == os.getenv("GITHUB_SHA")))
             stats = run_deal_cycle(db, save, test_mode=args.preview, report_dir=args.report_dir,
                                    manual_asins=manual, report=report,
-                                   force_preview_checks=args.require_verified)
+                                   force_preview_checks=args.require_verified or bool(args.require_store),
+                                   affiliate_links=links,
+                                   include_flipkart=(config.FLIPKART_ENABLED and store_approved) or bool(args.require_store))
+            if args.require_store and not any(item["store"] == args.require_store
+                    and item["initial"] == "verified" and item.get("affiliate") == "ready"
+                    for item in report.products.values()):
+                report.fail("store_preview_incomplete")
+                report.write(args.report_dir)
+                return 1
             if args.require_verified and stats["verified"] == 0:
                 report.fail("no_verified_products")
                 report.write(args.report_dir)

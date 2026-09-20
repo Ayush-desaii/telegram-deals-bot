@@ -1,7 +1,7 @@
 """Eligibility and ranking after verification, separate from discovery scores."""
 from datetime import datetime, timezone, timedelta
 import config
-from product import amazon_asin, meaningful_drop, paise
+from product import product_key, retail_url, meaningful_drop, paise
 
 
 def eligible(deal, db, now=None):
@@ -12,7 +12,7 @@ def selection_reason(deal, db, now=None):
     now = now or datetime.now(timezone.utc)
     price = paise(deal.deal_price)
     if (not price or not deal.title or not deal.title.strip() or not deal.asin
-            or amazon_asin(deal.url) != deal.asin or deal.availability is not True
+            or product_key(retail_url(deal)) != deal.asin or deal.availability is not True
             or not deal.verified_at):
         return "invalid_product"
     try:

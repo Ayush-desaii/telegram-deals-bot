@@ -1,7 +1,7 @@
 name: Deals Tests
 on:
   push:
-    branches: [main, 'codex/deal-quality-history']
+    branches: [main, 'codex/**']
     paths: ['deals_bot/**', '.github/workflows/deals*.yml']
   pull_request:
     paths: ['deals_bot/**', '.github/workflows/deals*.yml']

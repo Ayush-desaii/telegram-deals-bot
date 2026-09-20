@@ -3,18 +3,20 @@ from datetime import timedelta
 from pathlib import Path
 
 from database import timestamp, utcnow
-from product import amazon_asin
+from product import product_identity, product_key, retail_url
 
 
-def load_manual(path):
+def load_manual(path, product_urls=None):
     asins = set()
     for number, line in enumerate(Path(path).read_text(encoding="utf-8-sig").splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        asin = amazon_asin(line)
+        asin = product_key(line)
         if not asin:
-            raise ValueError(f"Invalid Amazon product URL on watchlist line {number}")
+            raise ValueError(f"Invalid supported product URL on watchlist line {number}")
+        if product_urls is not None:
+            product_urls[asin] = line
         asins.add(asin)
     if len(asins) > 20:
         raise ValueError("Manual watchlist allows at most 20 distinct products")
@@ -31,7 +33,8 @@ class Watchlist:
                 WHERE manual=0 ORDER BY COALESCE(last_success_at,first_seen_at),asin LIMIT 1)""")
 
     def sync_manual(self, asins, now=None):
-        if len(set(asins)) > 20 or any(amazon_asin(f"https://www.amazon.in/dp/{a}") != a for a in asins):
+        urls = {a: self.db.product_url(a) or f"https://www.amazon.in/dp/{a}" for a in asins}
+        if len(set(asins)) > 20 or any(product_key(urls[a]) != a for a in asins):
             raise ValueError("Invalid manual watchlist")
         at = timestamp(now)
         with self.db.connection() as conn:
@@ -43,7 +46,7 @@ class Watchlist:
                     self._make_room(conn)
                     conn.execute("""INSERT INTO watchlist
                         (asin,url,title,first_seen_at,next_check_at,manual) VALUES (?,?,?,?,?,1)""",
-                                 (asin, f"https://www.amazon.in/dp/{asin}", asin, at, at))
+                                 (asin, urls[asin], asin, at, at))
         self.expire(now)
 
     def expire(self, now=None):
@@ -75,7 +78,7 @@ class Watchlist:
                     self._make_room(conn)
                     conn.execute("""INSERT INTO watchlist
                         (asin,url,title,first_seen_at,next_check_at) VALUES (?,?,?,?,?)""",
-                                 (asin, f"https://www.amazon.in/dp/{asin}", result.deal.title,
+                                 (asin, product_identity(retail_url(result.deal))[2], result.deal.title,
                                   timestamp(now), timestamp(now)))
                 conn.execute("""UPDATE watchlist SET title=?,last_check_at=?,last_success_at=?,
                     next_check_at=?,failure_count=0 WHERE asin=?""",

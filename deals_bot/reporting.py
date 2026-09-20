@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from database import timestamp
+from product import product_identity
 
 
 class CycleReport:
@@ -25,8 +26,11 @@ class CycleReport:
                                           "issues": dict(result.issues)}
 
     def add_candidate(self, candidate, discovered=False, watched=False):
+        store, identifier, _ = product_identity(candidate.url)
         item = self.products.setdefault(candidate.asin, {
             "asin": candidate.asin, "source_ids": [], "discovered": False, "watched": False,
+            "product_key": candidate.asin, "store": store, "product_id": identifier,
+            "affiliate": None,
             "initial": None, "refresh": None, "selection": None, "eligible": False,
             "attempted": False, "delivery": None,
         })
@@ -54,6 +58,7 @@ class CycleReport:
             "previewed": sum(item["delivery"] == "preview" for item in items),
             "checks_completed": sum(item["initial"] not in (None, "budget_skipped") for item in items),
             "watchlist_checks": sum(item["watched"] and item["initial"] not in (None, "budget_skipped") for item in items),
+            "affiliate_ready": sum(item.get("affiliate") == "ready" for item in items),
         }
 
     def data(self):
@@ -75,13 +80,15 @@ class CycleReport:
             "totals": {**self.totals(items), "watchlist_size": self.watchlist_size},
             "reasons": dict(sorted(reasons.items())), "sources": sources, "products": items,
             "source_counts_overlap": True,
+            "retailers": {store: self.totals([item for item in items if item["store"] == store])
+                          for store in sorted({item["store"] for item in items})},
         }
 
     def markdown(self):
         data = self.data()
         lines = [f"## Deals bot: {self.status} ({self.mode})", "",
                  f"Started: {self.started_at} UTC", "",
-                 "Global totals count unique ASINs. Source counts overlap when sources share a product.", "",
+                 "Global totals count unique retailer/product identities. Source counts overlap when sources share a product.", "",
                  "| Metric | Count |", "|---|---:|"]
         lines += [f"| {key} | {value} |" for key, value in data["totals"].items()
                   if key not in ("valid", "qualified")]

@@ -60,7 +60,7 @@ class WatchlistTests(IsolatedTest):
         self.assertIn(ASIN, self.watch.all_asins())
         self.assertFalse(self.db.can_post(old))
         with self.db.connection() as conn:
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM price_observations").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT status FROM posting_attempts WHERE id=?", (attempt,)).fetchone()[0], "pending")
 

@@ -1,3 +1,4 @@
-# One full Amazon India product URL per line; up to 20 distinct products.
+# One full Amazon India or Flipkart product URL per line; up to 20 total products.
+# Flipkart URLs must include ?pid=PRODUCT_ID and need a registered EarnKaro link to post.
 # These products stay on the watchlist even when search no longer finds them.
 # Example (replace with your product): https://www.amazon.in/dp/B012345678

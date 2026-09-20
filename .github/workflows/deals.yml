@@ -12,6 +12,11 @@ on:
         type: choice
         options: [preview, post]
         default: preview
+      require_store:
+        description: For preview, require Flipkart verification and a working EarnKaro link
+        type: choice
+        options: ['', flipkart]
+        default: ''
 
 permissions:
   contents: read
@@ -53,9 +58,15 @@ jobs:
           key: deals-db-preview-${{ github.run_id }}
           restore-keys: deals-db-
       - name: Verify production sources without posting
-        run: python -u deals_bot/main.py --test --git-state --require-verified --report-dir "$RUNNER_TEMP/deals-report"
+        run: |
+          extra=()
+          if [ "$REQUIRE_STORE" = flipkart ]; then extra+=(--require-store flipkart); fi
+          python -u deals_bot/main.py --test --git-state --require-verified --report-dir "$RUNNER_TEMP/deals-report" "${extra[@]}"
         env:
           AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
+          EARNKARO_LINKS_JSON: ${{ secrets.EARNKARO_LINKS_JSON }}
+          FLIPKART_ENABLED: ${{ vars.FLIPKART_ENABLED }}
+          REQUIRE_STORE: ${{ inputs.require_store }}
           MIN_DISCOUNT_PERCENT: '40'
           MAX_DEALS_PER_CYCLE: '2'
 
@@ -106,6 +117,9 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           AMAZON_AFFILIATE_TAG: ${{ secrets.AMAZON_AFFILIATE_TAG }}
           DEALS_APPROVED_SHA: ${{ vars.DEALS_APPROVED_SHA }}
+          FLIPKART_APPROVED_SHA: ${{ vars.FLIPKART_APPROVED_SHA }}
+          EARNKARO_LINKS_JSON: ${{ secrets.EARNKARO_LINKS_JSON }}
+          FLIPKART_ENABLED: ${{ vars.FLIPKART_ENABLED }}
           MIN_DISCOUNT_PERCENT: '40'
           MAX_DEALS_PER_CYCLE: '2'
 

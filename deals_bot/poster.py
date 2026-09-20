@@ -10,6 +10,8 @@ from fetcher import Deal
 from formatter import format_deal_message, format_text_only_message, fmt_price
 from watermark import add_watermark
 import config
+from earnkaro import purchase_url
+from product import store_name
 
 TELEGRAM_API = f"https://api.telegram.org/bot{config.BOT_TOKEN}"
 
@@ -54,21 +56,12 @@ def build_deal_keyboard(deal: Deal) -> dict:
 
     share_url = f"https://t.me/share/url?url={quote(channel_link, safe='')}&text={quote(share_text, safe='')}"
 
-    # Detect store for button text
-    url_lower = deal.url.lower()
-    if "flipkart" in url_lower:
-        store_name = "FLIPKART"
-    elif "myntra" in url_lower:
-        store_name = "MYNTRA"
-    elif "ajio" in url_lower:
-        store_name = "AJIO"
-    else:
-        store_name = "AMAZON"
+    retailer = store_name(deal).upper()
 
     return {
         "inline_keyboard": [
             [
-                {"text": f"🛒 BUY NOW ON {store_name} →", "url": deal.url}
+                {"text": f"🛒 BUY NOW ON {retailer} →", "url": purchase_url(deal)}
             ],
             [
                 {"text": "📢 SHARE DEAL WITH FRIENDS", "url": share_url}

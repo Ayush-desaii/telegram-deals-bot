@@ -9,10 +9,10 @@ import feedparser
 import requests
 
 import fetcher
-from product import amazon_asin, paise
+from product import amazon_asin, product_identity, product_key, retail_url, paise
 
 SOURCE_ERRORS = {"blocked", "timeout", "network_error", "http_error", "parse_error",
-                 "identity_mismatch", "invalid_price", "unknown_availability"}
+                 "identity_mismatch", "invalid_price", "unknown_availability", "stale_offer"}
 
 
 @dataclass
@@ -23,13 +23,13 @@ class ProductCandidate:
     source_ids: set[str] = field(default_factory=set)
 
     def __post_init__(self):
-        if not self.asin or amazon_asin(self.url) != self.asin:
+        if not self.asin or product_key(self.url) != self.asin:
             raise ValueError("Invalid product identity")
-        self.url = f"https://www.amazon.in/dp/{self.asin}"
+        self.url = product_identity(self.url)[2]
 
     @classmethod
     def from_deal(cls, deal, source_id="legacy"):
-        return cls(amazon_asin(deal.url), deal.url,
+        return cls(product_key(retail_url(deal)), retail_url(deal),
                    {"title": deal.title, "deal_price": deal.deal_price,
                     "original_price": deal.original_price}, {source_id})
 
@@ -213,6 +213,9 @@ def verify_candidate(candidate, client):
     response = client.get(candidate.url)
     if response.status != "successful":
         return VerificationResult(response.status)
+    if product_identity(candidate.url)[0] == "flipkart":
+        from flipkart import parse_product
+        return parse_product(candidate, response.response)
     soup = BeautifulSoup(response.response.text, "html.parser")
     if blocked_page(soup):
         return VerificationResult("blocked")
@@ -268,6 +271,16 @@ def select_candidates(due, discoveries, tracked):
             merged[candidate.asin] = candidate
     watched = [merged[row["asin"]] for row in due]
     new = [merged[asin] for asin in discovered_order if asin not in tracked]
+    # Interleave stores so the first ten new slots cannot always be consumed by
+    # the retailer whose sources happen to run first. No change for Amazon-only.
+    buckets = {}
+    for candidate in new:
+        buckets.setdefault(product_identity(candidate.url)[0], []).append(candidate)
+    new = []
+    while any(buckets.values()):
+        for bucket in buckets.values():
+            if bucket:
+                new.append(bucket.pop(0))
     selected = watched[:20] + new[:10]
     selected += (watched[20:] + new[10:])[:30 - len(selected)]
     chosen = {candidate.asin for candidate in selected}

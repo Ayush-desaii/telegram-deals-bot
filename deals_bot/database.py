@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 
-from product import amazon_asin, meaningful_drop, paise
+from product import product_key, product_identity, retail_url, meaningful_drop, paise
 
 
 def utcnow():
@@ -35,7 +35,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise RuntimeError("State schema is newer than this bot")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS posted_deals (
@@ -84,13 +84,41 @@ class Database:
                     AND asin NOT GLOB '*[^A-Z0-9]*'
                     GROUP BY asin HAVING MAX(observed_at)>=datetime('now','-30 days')
                     ORDER BY MAX(observed_at) DESC,asin LIMIT 100""")
-            conn.execute("PRAGMA user_version=2")
+            # Existing asin columns remain compatibility keys. Flipkart uses
+            # flipkart:PID, so no observations or pending reservations are rewritten.
+            conn.execute("""CREATE TABLE IF NOT EXISTS product_catalog (
+                product_key TEXT PRIMARY KEY, store TEXT NOT NULL,
+                product_id TEXT NOT NULL, canonical_url TEXT NOT NULL,
+                UNIQUE(store,product_id))""")
+            conn.execute("""INSERT OR IGNORE INTO product_catalog
+                SELECT asin,'amazon',asin,'https://www.amazon.in/dp/' || asin
+                FROM (SELECT asin FROM price_observations UNION SELECT asin FROM posting_attempts
+                      UNION SELECT asin FROM watchlist)
+                WHERE length(asin)=10 AND asin NOT GLOB '*[^A-Z0-9]*'""")
+            conn.execute("PRAGMA user_version=3")
+
+    def register_product(self, url):
+        identity = product_identity(url)
+        if not identity:
+            raise ValueError("Invalid retailer product")
+        key = product_key(url)
+        with self.connection() as conn:
+            conn.execute("""INSERT INTO product_catalog VALUES (?,?,?,?)
+                ON CONFLICT(product_key) DO UPDATE SET canonical_url=excluded.canonical_url""",
+                         (key, *identity))
+        return key
+
+    def product_url(self, key):
+        with self.connection() as conn:
+            row = conn.execute("SELECT canonical_url FROM product_catalog WHERE product_key=?", (key,)).fetchone()
+        return row[0] if row else None
 
     def observe(self, deal, now=None):
         price = paise(deal.deal_price)
-        asin = amazon_asin(deal.url)
+        asin = product_key(retail_url(deal))
         if not price or not asin:
             return
+        self.register_product(retail_url(deal))
         verified = bool(deal.verified_at and deal.availability is True)
         at = deal.verified_at if verified else timestamp(now)
         with self.connection() as conn:
@@ -120,7 +148,7 @@ class Database:
             latest = conn.execute("""SELECT * FROM posting_attempts WHERE asin=?
                 ORDER BY attempted_at DESC,id DESC LIMIT 1""", (deal.asin,)).fetchone()
             legacy = conn.execute("SELECT posted_at FROM posted_deals WHERE url_hash=?",
-                                  (make_hash(deal.url),)).fetchone()
+                                  (make_hash(retail_url(deal)),)).fetchone()
             sent = conn.execute("""SELECT * FROM posting_attempts WHERE asin=? AND status='sent'
                 ORDER BY attempted_at DESC,id DESC LIMIT 1""", (deal.asin,)).fetchone()
         if latest:
@@ -150,7 +178,7 @@ class Database:
                 at = conn.execute("SELECT attempted_at FROM posting_attempts WHERE id=?", (attempt_id,)).fetchone()[0]
                 conn.execute("""INSERT INTO posted_deals(url_hash,title,source,posted_at) VALUES(?,?,?,?)
                     ON CONFLICT(url_hash) DO UPDATE SET title=excluded.title, source=excluded.source,
-                    posted_at=excluded.posted_at""", (make_hash(deal.url), deal.title, deal.source, at))
+                    posted_at=excluded.posted_at""", (make_hash(retail_url(deal)), deal.title, deal.source, at))
 
     def cleanup(self, now=None):
         with self.connection() as conn:
@@ -189,4 +217,4 @@ class Database:
 
 
 def make_hash(url):
-    return hashlib.md5((amazon_asin(url) or url.strip()).encode()).hexdigest()
+    return hashlib.md5((product_key(url) or url.strip()).encode()).hexdigest()

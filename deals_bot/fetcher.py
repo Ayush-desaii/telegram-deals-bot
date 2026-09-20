@@ -43,6 +43,9 @@ class Deal:
     historical_days: int = 0
     savings_percent: float = 0
     savings_paise: int = 0
+    canonical_url: Optional[str] = None
+    affiliate_url: Optional[str] = None
+    affiliate_verified_at: Optional[str] = None
 
 
 # ── HTTP Session ───────────────────────────────────────────────────────────────
@@ -114,7 +117,7 @@ def make_affiliate_url(asin_or_url: str) -> str:
     """
     Converts product links into affiliate links:
     - Amazon links get Amazon Associates tag
-    - Flipkart, Myntra, Ajio links get EarnKaro affiliate redirect
+    Other retailers require a genuine account-generated Profit Link.
     """
     url = asin_or_url
     if re.match(r"^[A-Z0-9]{10}$", url):
@@ -123,13 +126,7 @@ def make_affiliate_url(asin_or_url: str) -> str:
     if amazon_asin(url):
         return add_affiliate_tag(url)
 
-    # Multi-store EarnKaro routing (Flipkart, Myntra, Ajio, Nykaa)
-    ek_id = getattr(config, "EARNKARO_USER_ID", "")
-    if ek_id and any(store in url for store in ["flipkart.com", "myntra.com", "ajio.com", "nykaa.com"]):
-        from urllib.parse import quote
-        return f"https://earnkaro.com/deal?url={quote(url, safe='')}&r={ek_id}"
-
-    return url
+    raise ValueError("Use an account-generated EarnKaro Profit Link for this retailer")
 
 def resolve_short_url(url: str) -> str:
     if urlparse(url).hostname in ("amzn.to", "amzn.in"):

@@ -16,10 +16,11 @@ CHANNEL_ID: str = os.getenv("TELEGRAM_CHANNEL_ID", "")
 # ── Affiliate: Amazon ─────────────────────────────────────
 AMAZON_AFFILIATE_TAG: str = os.getenv("AMAZON_AFFILIATE_TAG", "")
 
-# ── Affiliate: Multi-Store via EarnKaro (Flipkart, Myntra, Ajio) ──
-# Sign up free: https://earnkaro.com/
-# Use your Referral code/ID from your profile (e.g. 1234567)
-EARNKARO_USER_ID: str = os.getenv("EARNKARO_USER_ID", "")
+# Account-generated Profit Links. A referral ID is NOT a link-generation API.
+EARNKARO_LINKS_FILE = Path(os.getenv("EARNKARO_LINKS_FILE", str(BASE_DIR / "earnkaro_links.json")))
+EARNKARO_LINKS_JSON = os.getenv("EARNKARO_LINKS_JSON", "")
+# Enable only after a Flipkart + EarnKaro production-environment preview passes.
+FLIPKART_ENABLED = os.getenv("FLIPKART_ENABLED", "false").lower() == "true"
 
 # ── Amazon PA API (optional but recommended for best results) ──
 # Sign up: https://affiliate-program.amazon.in/assoc_credentials/home

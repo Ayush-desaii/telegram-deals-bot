@@ -2,6 +2,8 @@
 from html import escape
 from decimal import Decimal
 from fetcher import Deal
+from earnkaro import purchase_url
+from product import store_name
 
 
 def fmt_price(price):
@@ -9,6 +11,8 @@ def fmt_price(price):
 
 
 def format_deal_message(deal: Deal) -> str:
+    retailer = store_name(deal)
+    link = purchase_url(deal)
     if deal.historical_price_paise is not None:
         heading = f"{deal.savings_percent:.1f}% below observed price"
         comparison = (f"Observed comparison: {fmt_price(Decimal(deal.historical_price_paise) / 100)}"
@@ -23,10 +27,11 @@ def format_deal_message(deal: Deal) -> str:
              f"Save {fmt_price(Decimal(deal.savings_paise) / 100)}"]
     if deal.rating:
         lines.append(f"Rating: {escape(str(deal.rating)[:5])}/5")
-    lines.extend(["", f'<a href="{escape(deal.url, quote=True)}">Buy on Amazon →</a>',
+    lines.extend(["", f'<a href="{escape(link, quote=True)}">Buy on {retailer} →</a>',
                   f"Checked: {escape(str(deal.verified_at)[:19])} UTC",
                   "Price and availability may change.",
-                  "Affiliate link: we may earn from qualifying purchases.", "#AmazonIndia #Deals"])
+                  "Affiliate link: we may earn from qualifying purchases.",
+                  "#AmazonIndia #Deals" if retailer == "Amazon" else "#Flipkart #Deals"])
     result = "\n".join(lines)
     if len(result.encode("utf-16-le")) // 2 > 1024:
         raise ValueError("Caption exceeds Telegram limit")
